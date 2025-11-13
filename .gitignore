@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.pyc
+
+# VSCode
+.vscode/
+
+# venv
+.venv/
+
+# data files
+data/
+
+# embeddings
+src/embeddings/
