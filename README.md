@@ -30,7 +30,7 @@ source ./.venv/bin/activate
 4. **主流程集成**
     - `main.py` 串联上述步骤，提供 `--overwrite-clean`、`--overwrite-index`、`--reuse-cache` 等开关，支持一次性完成“清洗 → 向量化 → 检索 → 结果导出”。
     - 全程使用 `logging` 输出阶段性进度、统计指标，便于调参或部署到 ML pipeline。
-    - 依赖精简为 `pandas`、`numpy`、`tqdm`、`faiss-cpu`、`sentence-transformers`、`LangChain` 相关包等必需库，满足本地/离线运行需求。
+    - 依赖精简为 `pandas`、`numpy`、`tqdm`、`faiss-cpu`、`sentence-transformers`、`LangChain` 相关包等必需库，满足本地和离线运行需求。
 
 ## 运行方法
 
