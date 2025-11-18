@@ -9,7 +9,10 @@ __pycache__/
 .venv/
 
 # data files
-data/
+data/test_payload.csv
+data/test_payload_cleaned.csv
+data/train_with_ultimate.csv
+data/train_with_ultimate_cleaned.csv
 
 # embeddings
 embeddings/
