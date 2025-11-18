@@ -42,9 +42,9 @@ tar -xzvf ./data/train.tar.gz
 
 ```bash
 python main.py \
---train-path ./data/train_with_ultimate.csv \
---test-path ./data/test_payload.csv \
+--train-path ./data/train_payload.csv \
+--test-path ./data/target_payload.csv \
 --store-dir ./embeddings/faiss_store \
---output-path ./asn/test_label_pipeline.csv \
+--output-path ./ans/target_labeled.csv \
 --reuse-cache
 ```
