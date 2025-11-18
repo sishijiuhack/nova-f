@@ -1,5 +1,7 @@
 # Datacon2025
+
 互联网威胁分析赛道-漏洞攻击流量识别
+
 ## 安装环境
 
 ```bash
@@ -7,7 +9,11 @@
 source ./.venv/bin/activate
 ```
 
-注意将自己的data数据集放在`data/`文件夹下，并修改路径
+解压示例数据集，也可以使用自己的数据集，注意`csv`的格式需要匹配
+
+```bash
+tar -xzvf ./data/train.tar.gz
+```
 
 ## 框架
 
