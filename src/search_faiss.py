@@ -136,6 +136,55 @@ def adaptive_predict(
     return preds
 
 
+def aggregate_cve_candidates(
+    idxs: Sequence[int],
+    sims: Sequence[float],
+    train_labels: Sequence[Sequence[str]],
+    *,
+    base_threshold: float,
+    max_candidates: int,
+    min_votes: int = 1,
+    vote_weight: float = 0.015,
+) -> tuple[List[tuple[str, float]], int]:
+    """Aggregate CVE evidence across nearest neighbours.
+
+    The original pipeline kept the first label seen for each neighbour. That is
+    brittle when many near-duplicate payloads point to the same CVE but one
+    slightly closer sample has a noisy or broad multi-label annotation. This
+    helper scores each CVE by its best similarity plus a small vote bonus from
+    additional neighbours.
+    """
+    stats: dict[str, dict[str, float | int]] = {}
+    filtered_out = 0
+
+    for idx, score in zip(idxs, sims):
+        if idx < 0 or idx >= len(train_labels):
+            continue
+        score_float = float(score)
+        if score_float < base_threshold:
+            filtered_out += 1
+            continue
+
+        for cve in train_labels[idx]:
+            base_cve = cve.upper()
+            if not base_cve.startswith("CVE-"):
+                continue
+            item = stats.setdefault(base_cve, {"best": score_float, "votes": 0})
+            item["best"] = max(float(item["best"]), score_float)
+            item["votes"] = int(item["votes"]) + 1
+
+    ranked: list[tuple[str, float]] = []
+    for cve, item in stats.items():
+        votes = int(item["votes"])
+        if votes < min_votes:
+            continue
+        best_score = float(item["best"])
+        ranked.append((cve, best_score + min(votes - 1, 8) * vote_weight))
+
+    ranked.sort(key=lambda pair: pair[1], reverse=True)
+    return ranked[:max_candidates], filtered_out
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="使用 FAISS 索引进行离线 CVE 检索")
     parser.add_argument("--test-path", required=True, help="测试集 CSV 路径")
@@ -154,6 +203,8 @@ def main() -> None:
     parser.add_argument("--medium-confidence", type=float, default=0.78, help="中等置信阈值")
     parser.add_argument("--second-gap", type=float, default=0.15, help="第二个候选与第一个的最大差值")
     parser.add_argument("--third-gap", type=float, default=0.05, help="第三个候选与第二个的最大差值")
+    parser.add_argument("--min-votes", type=int, default=1, help="CVE aggregate minimum neighbour votes")
+    parser.add_argument("--vote-weight", type=float, default=0.015, help="CVE aggregate vote bonus")
     parser.add_argument("--search-batch-size", type=int, default=512, help="FAISS 检索时的批量大小")
     parser.add_argument("--verbose", action="store_true", help="开启详细日志")
     args = parser.parse_args()
@@ -231,32 +282,22 @@ def main() -> None:
         for offset, row_id in enumerate(test_ids[start:end]):
             sims = D[offset]
             idxs = I[offset]
-            seen: set[str] = set()
-            candidates: List[tuple[str, float]] = []
-
             for idx, score in zip(idxs, sims):
                 total_candidates += 1
                 if idx < 0 or idx >= len(train_ids):
                     continue
-                score_float = float(score)
-                score_stats.append(score_float)
-                if score_float < args.base_threshold:
-                    filtered_out += 1
-                    continue
+                score_stats.append(float(score))
 
-                cve_list = train_labels[idx]
-                for cve in cve_list:
-                    base_cve = cve.upper()
-                    if not base_cve.startswith("CVE-"):
-                        continue
-                    if base_cve in seen:
-                        continue
-                    seen.add(base_cve)
-                    candidates.append((base_cve, score_float))
-                    if len(candidates) >= args.max_candidates:
-                        break
-                if len(candidates) >= args.max_candidates:
-                    break
+            candidates, filtered = aggregate_cve_candidates(
+                idxs,
+                sims,
+                train_labels,
+                base_threshold=args.base_threshold,
+                max_candidates=args.max_candidates,
+                min_votes=max(1, args.min_votes),
+                vote_weight=args.vote_weight,
+            )
+            filtered_out += filtered
 
             preds = adaptive_predict(
                 candidates,

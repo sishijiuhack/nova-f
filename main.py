@@ -164,6 +164,8 @@ def label_test_payloads(
 	second_gap: float,
 	third_gap: float,
 	search_batch_size: int,
+	min_votes: int,
+	vote_weight: float,
 	reuse_cache: bool,
 ) -> Path:
 	"""Generate CVE predictions for the provided test dataset."""
@@ -236,31 +238,23 @@ def label_test_payloads(
 		for offset, row_id in enumerate(test_ids[start:end]):
 			sims = D[offset]
 			idxs = I[offset]
-			seen: set[str] = set()
-			candidates: List[tuple[str, float]] = []
 
 			for idx, score in zip(idxs, sims):
 				total_candidates += 1
 				if idx < 0 or idx >= len(train_ids):
 					continue
-				score_float = float(score)
-				score_stats.append(score_float)
-				if score_float < base_threshold:
-					filtered_out += 1
-					continue
+				score_stats.append(float(score))
 
-				for cve in train_labels[idx]:
-					base_cve = cve.upper()
-					if not base_cve.startswith("CVE-"):
-						continue
-					if base_cve in seen:
-						continue
-					seen.add(base_cve)
-					candidates.append((base_cve, score_float))
-					if len(candidates) >= max_candidates:
-						break
-				if len(candidates) >= max_candidates:
-					break
+			candidates, filtered = search_mod.aggregate_cve_candidates(
+				idxs,
+				sims,
+				train_labels,
+				base_threshold=base_threshold,
+				max_candidates=max_candidates,
+				min_votes=max(1, min_votes),
+				vote_weight=vote_weight,
+			)
+			filtered_out += filtered
 
 			preds = search_mod.adaptive_predict(
 				candidates,
@@ -316,6 +310,8 @@ def parse_args() -> argparse.Namespace:
 	parser.add_argument("--medium-confidence", type=float, default=0.78, help="第二候选中置信阈值")
 	parser.add_argument("--second-gap", type=float, default=0.15, help="第二候选与第一候选最大差值")
 	parser.add_argument("--third-gap", type=float, default=0.05, help="第三候选与第二候选最大差值")
+	parser.add_argument("--min-votes", type=int, default=1, help="CVE aggregate minimum neighbour votes")
+	parser.add_argument("--vote-weight", type=float, default=0.015, help="CVE aggregate vote bonus")
 	parser.add_argument("--overwrite-clean", action="store_true", help="强制重新生成清洗数据")
 	parser.add_argument("--overwrite-test-clean", action="store_true", help="强制重新生成测试清洗数据")
 	parser.add_argument("--overwrite-index", action="store_true", help="强制重新构建索引")
@@ -391,6 +387,8 @@ def main() -> None:
 		second_gap=args.second_gap,
 		third_gap=args.third_gap,
 		search_batch_size=args.search_batch_size,
+		min_votes=args.min_votes,
+		vote_weight=args.vote_weight,
 		reuse_cache=args.reuse_cache,
 	)
 

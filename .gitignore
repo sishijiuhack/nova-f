@@ -13,6 +13,13 @@ data/test_payload.csv
 data/test_payload_cleaned.csv
 data/train_with_ultimate.csv
 data/train_with_ultimate_cleaned.csv
+data/external/
+data/experiments/
+data/*_converted.csv
+wp.pdf
+wp_extracted.txt
+PROGRESS_REPORT.md
+ans/sample_labeled.csv
 
 # embeddings
 embeddings/
