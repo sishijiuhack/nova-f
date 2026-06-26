@@ -1216,3 +1216,103 @@ python experiments/test_feature_rerank.py \
 ```
 
 每个实验耗时 < 5 分钟，可快速排除无效方案。
+ 
+## Codex 实验记录：长尾诊断、结构化规则与 rerank
+
+时间：2026-06-26
+
+本轮针对 Claude 报告中提到的“结构化特征”和“长尾 CVE”方向继续实验。执行原则是不把官方测试集错误直接写死为最终规则，只采纳训练集 OOF 或训练数据可解释挖掘得到的策略。
+
+新增：
+```text
+utils/diagnose_long_tail.py
+utils/structured_signature_rules.py
+utils/structured_rerank_experiment.py
+```
+
+### 长尾诊断
+
+当前泛化证据较强路线仍存在大量 zero-F1：
+```text
+labels: 1311
+zero_f1: 540
+```
+
+部分高 FN CVE 在训练集中无支持样本，例如：
+```text
+CVE-2021-20016: train_support=0, fn=403
+CVE-2024-1800:  train_support=0, fn=73
+CVE-2023-3306:  train_support=0, fn=27
+```
+
+判断：这类 CVE 不能靠“真实场景可辩护”的训练规则补齐，需要外部样本或后续授权数据。
+
+### 结构化规则
+
+结构化规则覆盖：
+```text
+path
+query_keys
+body_keys
+query_key_value
+body_key_value
+token
+```
+
+OOF 结果：
+```text
+min_support=20, min_precision=1.0
+precision: 0.991996
+recall:    0.622656
+micro_f1:  0.764982
+macro_f1:  0.848935
+```
+
+低 support 规则虽然更多，但 OOF 效果下降：
+```text
+support=10: micro_f1=0.714005
+support=5:  micro_f1=0.724278
+```
+
+结论：结构化规则方向正确，但必须保持高 support/高 precision，不能为了覆盖率盲目放宽。
+
+### 结构化 rerank
+
+结构化 rerank 使用 cached top-100 近邻，不重新训练 embedding：
+```text
+score = semantic_score + alpha * feature_bonus
+```
+
+单独 rerank：
+```text
+alpha=0.000 micro_f1=0.687127 macro_f1=0.524130
+alpha=0.030 micro_f1=0.693526 macro_f1=0.532527
+```
+
+组合当前训练可验证策略后：
+```text
+structured rerank
++ OOF blocklist
++ structured rules only-empty
++ wsman-38649
+
+precision: 0.739922
+recall:    0.756264
+micro_f1:  0.748004
+macro_f1:  0.548448
+zero_f1_labels: 535
+```
+
+对比旧的泛化证据较强路线：
+```text
+micro_f1: 0.746699 -> 0.748004
+macro_f1: 0.538537 -> 0.548448
+recall:   0.735355 -> 0.756264
+```
+
+代价：
+```text
+precision: 0.758397 -> 0.739922
+```
+
+结论：Claude 关于结构化特征值得做的判断成立，但应该采用“可验证、轻量 rerank”的方式，而不是直接写大量手工规则。当前新增路线更偏召回和 Macro-F1，可作为真实场景候选；保守高 precision 路线仍应保留。

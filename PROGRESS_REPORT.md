@@ -1071,3 +1071,94 @@ delta_macro_f1: +0.000748
 - 全局多标签扩展策略不成立，会引入 FP 或无收益。
 - 多标签问题需要定向 group completion，而不是全局复制近邻 labelset。
 - 当前最稳的做法仍是保留 `wsman-38649` 这种训练验证通过的定向规则。
+ 
+## 15. 2026-06-26 追加优化进展：长尾诊断、结构化规则与 rerank
+
+本轮继续围绕真实场景可辩护的优化推进，原则是不使用官方测试集真值直接写死规则，只采纳训练集 OOF 或训练集挖掘可解释的策略。
+
+新增工具：
+```text
+utils/diagnose_long_tail.py
+utils/structured_signature_rules.py
+utils/structured_rerank_experiment.py
+```
+
+长尾诊断确认当前泛化证据较强路线仍有大量 zero-F1：
+```text
+labels: 1311
+zero_f1: 540
+```
+
+高 FN/zero-F1 中一部分训练集中完全没有支持样本，例如：
+```text
+CVE-2021-20016: train_support=0, fn=403
+CVE-2024-1800:  train_support=0, fn=73
+CVE-2023-3306:  train_support=0, fn=27
+```
+
+这类 CVE 不能靠训练集可验证规则安全补召回，需要外部公开样本或后续授权数据补充。
+
+结构化签名规则从仅 path 扩展为：
+```text
+path
+query_keys
+body_keys
+query_key_value
+body_key_value
+suspicious token
+```
+
+OOF 验证结果：
+```text
+min_support=20, min_precision=1.0
+precision: 0.991996
+recall:    0.622656
+micro_f1:  0.764982
+macro_f1:  0.848935
+```
+
+低支持规则对比：
+```text
+min_support=10: micro_f1=0.714005
+min_support=5:  micro_f1=0.724278
+```
+
+结论：低 support 虽然规则更多，但 OOF 表现下降，泛化风险更高。因此当前只保留 `support=20, precision=1.0` 作为可辩护候选。
+
+结构化 rerank 单独实验：
+```text
+alpha=0.000 micro_f1=0.687127 macro_f1=0.524130
+alpha=0.030 micro_f1=0.693526 macro_f1=0.532527
+```
+
+当前新的召回增强候选：
+```text
+structured rerank + OOF blocklist + structured rules only-empty + wsman-38649
+
+precision: 0.739922
+recall:    0.756264
+micro_f1:  0.748004
+macro_f1:  0.548448
+zero_f1_labels: 535
+```
+
+相对旧的泛化证据较强路线：
+```text
+micro_f1: 0.746699 -> 0.748004
+macro_f1: 0.538537 -> 0.548448
+recall:   0.735355 -> 0.756264
+```
+
+代价是 precision 下降：
+```text
+precision: 0.758397 -> 0.739922
+```
+
+因此保留两条候选路线：
+```text
+保守高 precision:
+OOF blocklist + wsman-38649 + exact mined path rules
+
+召回/Macro-F1 优先:
+structured rerank + OOF blocklist + structured rules only-empty + wsman-38649
+```

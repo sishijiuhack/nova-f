@@ -300,3 +300,32 @@ wp_extracted.txt
 ```
 
 授权数据、模型权重、向量索引和预测输出只保留在本地。
+ 
+## 结构化召回增强候选
+
+除保守高 precision 路线外，当前还有一条召回/Macro-F1 优先候选：
+
+```text
+structured rerank + OOF blocklist + structured rules only-empty + wsman-38649
+precision: 0.739922
+recall:    0.756264
+micro_f1:  0.748004
+macro_f1:  0.548448
+```
+
+该路线使用训练集可验证规则和结构化特征重排，提升 recall、micro-F1 和 macro-F1，但 precision 低于保守路线。实际使用时可按目标选择：
+
+```text
+保守高 precision:
+OOF blocklist + wsman-38649 + exact mined path rules
+
+召回/Macro-F1 优先:
+structured rerank + OOF blocklist + structured rules only-empty + wsman-38649
+```
+
+相关实验工具：
+```bash
+python utils/diagnose_long_tail.py --help
+python utils/structured_signature_rules.py --help
+python utils/structured_rerank_experiment.py --help
+```

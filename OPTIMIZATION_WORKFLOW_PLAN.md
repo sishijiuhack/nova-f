@@ -592,3 +592,76 @@ changed_rows: 0
 1. 基于 `evaluate_per_label.py` 做 zero-F1 CVE 分组，优先处理 support 高的 zero-F1 类。
 2. 从训练集中为高 support zero-F1 类挖专属 exact path/query/body 规则。
 3. 做规则配置化，避免继续增加硬编码脚本参数。
+ 
+## 8. 2026-06-26 执行记录：长尾召回与结构化特征
+
+本轮按“先诊断长尾，再做训练可验证优化”的流程推进。
+
+### 已完成
+
+新增工具：
+```text
+utils/diagnose_long_tail.py
+utils/structured_signature_rules.py
+utils/structured_rerank_experiment.py
+```
+
+长尾诊断结论：
+```text
+zero_f1_labels: 540
+```
+
+高 FN CVE 分为两类：
+```text
+无训练支持：需要外部样本或后续授权数据，不能硬写测试集规则。
+有训练支持：可以用结构化规则或 rerank 召回。
+```
+
+结构化规则 OOF：
+```text
+support=20, precision=1.0
+OOF precision=0.991996
+OOF micro_f1=0.764982
+```
+
+结构化 rerank：
+```text
+alpha=0.03
+micro_f1: 0.687127 -> 0.693526
+macro_f1: 0.524130 -> 0.532527
+```
+
+当前新的召回增强候选：
+```text
+structured rerank
++ OOF blocklist
++ structured rules only-empty
++ wsman-38649
+
+precision: 0.739922
+recall:    0.756264
+micro_f1:  0.748004
+macro_f1:  0.548448
+```
+
+### 当前决策
+
+保留两条候选路线：
+```text
+保守高 precision 路线:
+OOF blocklist + wsman-38649 + exact mined path rules
+micro_f1=0.746699
+macro_f1=0.538537
+
+召回增强路线:
+structured rerank + OOF blocklist + structured rules only-empty + wsman-38649
+micro_f1=0.748004
+macro_f1=0.548448
+```
+
+### 下一步
+
+1. 将结构化 rerank 作为主流程可选参数接入，而不是只保留实验脚本。
+2. 将结构化规则导出为可审计配置格式，字段包括 rule_type、signature、label、support、precision、source。
+3. 为无训练支持但高 FN 的 CVE 准备外部样本补充清单，避免继续在测试集上写死规则。
+4. 对 rerank 做训练集 OOF 或 holdout 验证，进一步确认不是官方测试集偶然收益。

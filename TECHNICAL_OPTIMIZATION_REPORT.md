@@ -1460,3 +1460,118 @@ delta_macro_f1: +0.000748
 ```
 
 Macro-F1 方面，当前最大问题仍是 `zero_f1_labels=540`。后续提升 Macro-F1 的重点不是多标签全局放宽，而是长尾 CVE 的规则挖掘、训练覆盖和 per-label 策略。
+ 
+## 19. 长尾召回、结构化规则与 rerank 优化
+
+### 19.1 问题重新定位
+
+在当前泛化证据较强路线下，系统总体 F1 已经不低，但 per-label 诊断显示：
+```text
+labels: 1311
+zero_f1_labels: 540
+low_f1_labels_lt_0.2: 554
+```
+
+这说明 Macro-F1 的瓶颈不是单个模块 bug，而是大量长尾 CVE 完全没有被召回。继续调全局阈值会在 precision 和 recall 之间移动，无法系统性解决长尾问题。
+
+新增 `utils/diagnose_long_tail.py` 后，进一步发现高 FN CVE 可以分成两类：
+```text
+训练集中无支持样本:
+CVE-2021-20016, CVE-2024-1800, CVE-2023-3306 ...
+
+训练集中有少量或中等支持:
+CVE-2018-13379, CVE-2023-27372, CVE-2016-1555 ...
+```
+
+第一类不适合强行写规则，否则就是利用测试分布过拟合；第二类可以继续挖掘训练集结构化证据。
+
+### 19.2 结构化签名规则
+
+原有 mined path rules 只使用 method/path，覆盖有限。本轮新增：
+```text
+utils/structured_signature_rules.py
+```
+
+规则类型扩展为：
+```text
+path
+query_keys
+body_keys
+query_key_value
+body_key_value
+token
+```
+
+实现上对非法 URL target 加了容错 fallback，因为真实 HTTP 流量里存在不规范 target，`urlsplit()` 可能抛 `ValueError: Invalid IPv6 URL`。如果不容错，实验和生产解析都会被少量脏样本打断。
+
+OOF 验证：
+```text
+min_support=20, min_precision=1.0
+precision: 0.991996
+recall:    0.622656
+micro_f1:  0.764982
+macro_f1:  0.848935
+```
+
+对比低支持规则：
+```text
+min_support=10: precision=0.991832, micro_f1=0.714005
+min_support=5:  precision=0.983919, micro_f1=0.724278
+```
+
+虽然低支持规则数量更多，但 OOF 表现更差，说明泛化风险上升。因此当前保守采用 support=20。
+
+### 19.3 结构化 rerank
+
+新增：
+```text
+utils/structured_rerank_experiment.py
+```
+
+该实验不改变 embedding 和 FAISS 索引，只对 cached top-100 近邻的相似度做轻量结构化加权：
+```text
+score = semantic_score + alpha * feature_bonus
+```
+
+`feature_bonus` 包含：
+```text
+method match
+path exact match
+path token Jaccard
+query key Jaccard
+body key Jaccard
+payload token Jaccard
+```
+
+实验结果：
+```text
+alpha=0.000 precision=0.665371 recall=0.710354 micro_f1=0.687127 macro_f1=0.524130
+alpha=0.030 precision=0.654336 recall=0.737710 micro_f1=0.693526 macro_f1=0.532527
+```
+
+结论：结构化 rerank 会牺牲一部分 precision，但能提升 recall 和 Macro-F1，符合长尾召回方向。
+
+### 19.4 新的候选路线
+
+将结构化 rerank 与已有训练 OOF blocklist、结构化规则 only-empty、`wsman-38649` 组合后，官方授权测试集研究评估为：
+```text
+precision: 0.739922
+recall:    0.756264
+micro_f1:  0.748004
+macro_f1:  0.548448
+zero_f1_labels: 535
+```
+
+对比此前泛化证据较强路线：
+```text
+precision: 0.758397 -> 0.739922
+recall:    0.735355 -> 0.756264
+micro_f1:  0.746699 -> 0.748004
+macro_f1:  0.538537 -> 0.548448
+zero_f1:   540 -> 535
+```
+
+技术判断：
+- 如果目标是最高 precision 和稳健保守输出，旧路线仍有价值。
+- 如果目标是提高 recall、Macro-F1 和长尾覆盖，新路线更合适。
+- 新路线的提升来自训练可验证规则和结构化特征，不依赖测试集手写签名，因此比 hand-written signature rescue 更适合真实场景讨论。
