@@ -88,6 +88,7 @@ def build_vector_store(
 	model_path: str,
 	device: str | None,
 	batch_size: int,
+	train_text_prefix: str,
 	overwrite: bool,
 ) -> tuple[Path, Path]:
 	"""Create (or reuse) the FAISS index and metadata."""
@@ -118,6 +119,7 @@ def build_vector_store(
 		payloads,
 		batch_size=max(1, batch_size),
 		desc="生成训练向量",
+		text_prefix=train_text_prefix,
 	)
 
 	npy_path = store_dir / "train_embeddings.npy"
@@ -138,6 +140,7 @@ def build_vector_store(
 		"payload_column": "payload_clean",
 		"id_column": "id",
 		"embedding_model": model_path,
+		"train_text_prefix": train_text_prefix,
 		"created_at": datetime.now(tz=UTC).isoformat(),
 	}
 	meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -169,6 +172,7 @@ def label_test_payloads(
 	empty_penalty_margin: float,
 	empty_penalty_floor: float,
 	empty_penalty_ratio: float,
+	test_text_prefix: str | None,
 	reuse_cache: bool,
 ) -> Path:
 	"""Generate CVE predictions for the provided test dataset."""
@@ -198,13 +202,17 @@ def label_test_payloads(
 	model_name = model_path or meta.get("embedding_model")
 	if not model_name:
 		raise ValueError("无法确定嵌入模型，请在参数或元数据中指定 embedding_model")
+	prefix_for_test = test_text_prefix
+	if prefix_for_test is None:
+		prefix_for_test = str(meta.get("test_text_prefix", ""))
 
 	test_vectors: np.ndarray | None = None
 	if reuse_cache and cache_emb_path.exists() and cache_meta_path.exists():
 		cache_info = json.loads(cache_meta_path.read_text(encoding="utf-8"))
 		cached_ids = cache_info.get("ids") if isinstance(cache_info, dict) else None
 		cached_model = cache_info.get("embedding_model") if isinstance(cache_info, dict) else None
-		if cached_ids == test_ids and cached_model == model_name:
+		cached_prefix = cache_info.get("test_text_prefix", "") if isinstance(cache_info, dict) else ""
+		if cached_ids == test_ids and cached_model == model_name and cached_prefix == prefix_for_test:
 			logging.info("检测到匹配的测试向量缓存，将直接复用: %s", cache_emb_path)
 			test_vectors = np.load(cache_emb_path)
 		else:
@@ -217,11 +225,13 @@ def label_test_payloads(
 			payloads,
 			batch_size=max(1, batch_size),
 			desc="生成测试向量",
+			text_prefix=prefix_for_test,
 		)
 		np.save(cache_emb_path, test_vectors)
 		cache_payload = {
 			"ids": test_ids,
 			"embedding_model": model_name,
+			"test_text_prefix": prefix_for_test,
 		}
 		cache_meta_path.write_text(json.dumps(cache_payload, ensure_ascii=False, indent=2), encoding="utf-8")
 		logging.info("测试向量与缓存元数据已保存，可使用 --reuse-cache 复用。")
@@ -316,6 +326,8 @@ def parse_args() -> argparse.Namespace:
 	parser.add_argument("--device", default=None, help="模型加载设备，如 cpu/cuda")
 	parser.add_argument("--train-batch-size", type=int, default=32, help="训练向量编码批量大小")
 	parser.add_argument("--test-batch-size", type=int, default=32, help="测试向量编码批量大小")
+	parser.add_argument("--train-text-prefix", default="", help="训练文本编码前缀，例如 E5 使用 'passage: '")
+	parser.add_argument("--test-text-prefix", default=None, help="测试文本编码前缀，例如 E5 使用 'query: '；默认读取索引元数据或空字符串")
 	parser.add_argument("--search-batch-size", type=int, default=512, help="FAISS 检索批量大小")
 	parser.add_argument("--top-k", type=int, default=50, help="检索候选数量")
 	parser.add_argument("--max-candidates", type=int, default=5, help="每条样本保留的候选 CVE 数量")
@@ -384,6 +396,7 @@ def main() -> None:
 		model_path=model_for_training,
 		device=args.device,
 		batch_size=args.train_batch_size,
+		train_text_prefix=args.train_text_prefix,
 		overwrite=args.overwrite_index,
 	)
 
@@ -409,6 +422,7 @@ def main() -> None:
 		empty_penalty_margin=args.empty_penalty_margin,
 		empty_penalty_floor=args.empty_penalty_floor,
 		empty_penalty_ratio=args.empty_penalty_ratio,
+		test_text_prefix=args.test_text_prefix,
 		reuse_cache=args.reuse_cache,
 	)
 

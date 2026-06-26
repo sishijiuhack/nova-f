@@ -37,6 +37,7 @@ def embed_texts(
     batch_size: int,
     desc: str,
     normalize_vectors: bool = False,
+    text_prefix: str = "",
 ) -> np.ndarray:
     """批量生成文本向量。"""
     total = len(texts)
@@ -49,6 +50,8 @@ def embed_texts(
         chunk = list(texts[start:end])
         if not chunk:
             continue
+        if text_prefix:
+            chunk = [f"{text_prefix}{text}" for text in chunk]
         chunk_vecs = model.encode(
             chunk,
             batch_size=batch_size,
@@ -244,6 +247,7 @@ def main() -> None:
     parser.add_argument("--model-path", default=None, help="SentenceTransformer 模型路径或名称（默认读取索引元数据）")
     parser.add_argument("--device", default=None, help="模型加载设备，如 cpu/cuda")
     parser.add_argument("--batch-size", type=int, default=32, help="嵌入批量大小")
+    parser.add_argument("--text-prefix", default=None, help="测试文本编码前缀，例如 E5 使用 'query: '；默认读取索引元数据或空字符串")
     parser.add_argument("--reuse-cache", action="store_true", help="如缓存存在则复用测试向量")
     parser.add_argument("--top-k", type=int, default=50, help="FAISS 检索的候选数量")
     parser.add_argument("--max-candidates", type=int, default=5, help="每条样本保留的候选 CVE 数量")
@@ -289,6 +293,9 @@ def main() -> None:
     model_path = args.model_path or meta.get("embedding_model")
     if not model_path:
         raise ValueError("未在参数或索引元数据中找到 embedding 模型信息，请使用 --model-path 指定。")
+    text_prefix = args.text_prefix
+    if text_prefix is None:
+        text_prefix = str(meta.get("test_text_prefix", ""))
     logging.info("使用嵌入模型: %s", model_path)
 
     test_vectors: np.ndarray | None = None
@@ -296,7 +303,8 @@ def main() -> None:
         cache_info = json.loads(cache_meta_path.read_text(encoding="utf-8"))
         cached_ids = cache_info.get("ids") if isinstance(cache_info, dict) else None
         cached_model = cache_info.get("embedding_model") if isinstance(cache_info, dict) else None
-        if cached_ids == test_ids and cached_model == model_path:
+        cached_prefix = cache_info.get("test_text_prefix", "") if isinstance(cache_info, dict) else ""
+        if cached_ids == test_ids and cached_model == model_path and cached_prefix == text_prefix:
             logging.info("检测到匹配的测试向量缓存，直接复用: %s", cache_emb_path)
             test_vectors = np.load(cache_emb_path)
         else:
@@ -310,11 +318,13 @@ def main() -> None:
             payloads,
             batch_size=max(1, args.batch_size),
             desc="生成测试向量",
+            text_prefix=text_prefix,
         )
         np.save(cache_emb_path, test_vectors)
         cache_payload = {
             "ids": test_ids,
             "embedding_model": model_path,
+            "test_text_prefix": text_prefix,
         }
         cache_meta_path.write_text(json.dumps(cache_payload, ensure_ascii=False, indent=2), encoding="utf-8")
         logging.info("测试向量与缓存元数据已保存，后续可使用 --reuse-cache 复用。")
