@@ -76,9 +76,11 @@ models/all-MiniLM-L6-v2
 - `utils/convert_datacon_jsonl.py`：将官方 `json.gz` 数据转换为项目 CSV。
 - `utils/evaluate_predictions.py`：本地计算 `exact_match`、`precision`、`recall`、`micro_f1`、`macro_f1`。
 - `utils/merge_training_csv.py`：合并扩展训练集和官方训练集，用于构建 combined 索引。
+- `utils/tune_retrieval_params.py`：基于缓存 top-k 检索结果进行阈值和负证据参数搜索。
 - `src/search_faiss.py`：新增 CVE 候选聚合、空标签近邻负证据抑制。
 - `main.py`：主流水线接入负证据抑制参数，并更新默认阈值。
 - `src/preprocess.py`：修复 `NaN`/`None`/`null` 被错误归一化为标签的问题。
+- `src/build_faiss.py` / `src/search_faiss.py` / `main.py`：新增文本编码前缀参数，支持 E5 类检索模型的 `passage:` / `query:` 前缀。
 
 ## 4. 当前最佳实验结论
 
@@ -232,7 +234,59 @@ recall: 0.757105 -> 0.710354
 
 这是可接受的权衡，因为原主要瓶颈是负样本误报。
 
-## 5. 推荐运行命令
+## 5. 更强 embedding 模型试验
+
+已下载并在 holdout 数据上测试：
+
+```text
+models/bge-small-en-v1.5
+models/e5-small-v2
+```
+
+测试集：
+
+```text
+data/experiments/holdout_train.csv: 2500 行
+data/experiments/holdout_valid.csv: 300 行
+```
+
+MiniLM 调参后较优结果：
+
+```text
+base_threshold: 0.88
+precision:      0.646789
+recall:         0.449045
+micro_f1:       0.530075
+macro_f1:       0.423855
+```
+
+BGE small 调参后较优结果：
+
+```text
+base_threshold: 0.96
+precision:      0.703125
+recall:         0.429936
+micro_f1:       0.533597
+macro_f1:       0.417634
+```
+
+E5 small 使用 `passage:` / `query:` 前缀后较优结果：
+
+```text
+base_threshold: 0.90
+precision:      0.463668
+recall:         0.426752
+micro_f1:       0.444444
+macro_f1:       0.377220
+```
+
+结论：
+
+- BGE small 在 holdout 上 micro F1 仅轻微高于 MiniLM，但 CPU 编码速度明显更慢，暂不替换默认模型。
+- E5 small 当前不适配 payload 检索任务，暂不进入全量实验。
+- 当前最大收益仍来自 combined 索引、CVE 聚合和空标签近邻负证据抑制。
+
+## 6. 推荐运行命令
 
 先合并训练集：
 
@@ -262,17 +316,42 @@ python main.py \
 --empty-penalty-margin -1
 ```
 
-## 6. 后续优化方向
+参数搜索：
+
+```bash
+python utils/tune_retrieval_params.py \
+  --truth ./data/test_payload.csv \
+  --search ./data/experiments/search_top50_combined.npz \
+  --meta ./embeddings/faiss_store_combined/meta.json \
+  --bases 0.84,0.86,0.88,0.90 \
+  --empty-margins=-1,0.02,0.05,0.08
+```
+
+E5 类模型示例：
+
+```bash
+python main.py \
+  --train-path ./data/experiments/train_combined.csv \
+  --test-path ./data/test_payload.csv \
+  --store-dir ./embeddings/faiss_store_e5 \
+  --output-path ./data/experiments/test_e5.csv \
+  --model-path ./models/e5-small-v2 \
+  --train-text-prefix "passage: " \
+  --test-text-prefix "query: " \
+  --overwrite-index
+```
+
+## 7. 后续优化方向
 
 优先级建议：
 
-1. 将负证据过滤做成更系统的调参脚本，避免手写实验代码。
-2. 按 CVE 频次或类别设定动态阈值，降低热门 CVE 的误报。
-3. 对高频误报 CVE 做错误分析，检查是否存在训练样本标签污染。
-4. 尝试更强 embedding 模型或领域模型，但需先评估速度和离线可部署性。
-5. 将 FAISS 检索缓存和预测缓存拆开，减少重复 CPU 检索时间。
+1. 按 CVE 频次或类别设定动态阈值，降低热门 CVE 的误报。
+2. 对高频误报 CVE 做错误分析，检查是否存在训练样本标签污染。
+3. 在 GPU 或更长运行窗口下尝试 `bge-base-en-v1.5`、`e5-base-v2` 或安全领域模型。
+4. 将 FAISS 检索缓存和预测缓存拆开为正式命令，减少重复 CPU 检索时间。
+5. 对 payload 结构增加显式特征，例如请求方法、路径、参数名和 body 模式。
 
-## 7. Git 与数据管理
+## 8. Git 与数据管理
 
 以下内容不参与上传：
 
@@ -287,6 +366,15 @@ embeddings/
 ans/test_official_labeled.csv
 wp.pdf
 wp_extracted.txt
+```
+
+已清理：
+
+```text
+model_download.py
+__pycache__/
+src/__pycache__/
+utils/__pycache__/
 ```
 
 本报告仅记录进度和实验结果，不包含授权数据正文。
