@@ -1139,6 +1139,64 @@ top FN labels
 
 下一步建议优先做多标签输出策略优化和 per-label 评估脚本。
 
+---
+
+## Codex 实验记录：per-label 评估与多标签策略
+
+时间：2026-06-26
+
+新增：
+
+```text
+utils/evaluate_per_label.py
+utils/experiment_multilabel_strategy.py
+utils/experiment_labelset_completion.py
+```
+
+per-label 诊断：
+
+```text
+labels: 1311
+zero_f1_labels: 540
+low_f1_labels_lt_0.2: 554
+```
+
+这说明 Macro-F1 低不是少数类别造成的，而是大量长尾 CVE 完全没有召回。
+
+全局多标签策略实验结果：
+
+```text
+copy-top1 best:
+micro_f1: 0.746129
+macro_f1: 0.535819
+delta_micro_f1: -0.000570
+
+consensus best:
+micro_f1: 0.746585
+macro_f1: 0.538514
+delta_micro_f1: -0.000113
+```
+
+定向 labelset completion：
+
+```text
+OOF blocklist baseline:
+threshold=0.99
+min_votes=2
+require_subset=true
+changed_rows=101
+micro_f1: 0.736626
+delta_micro_f1: +0.003697
+```
+
+但当前基线已经启用 `wsman-38649`，所以 labelset completion 变更为 0。说明该策略的收益基本等价于修复 `/wsman` 四标签截断。
+
+判断：
+
+- 不应启用全局 copy-top1 或 consensus。
+- 多标签修复必须是有训练证据的定向 group completion。
+- 下一步应该围绕 zero-F1 高 support CVE 做长尾召回，而不是继续全局放宽输出。
+
 如需进一步讨论具体实现细节或代码示例，请随时沟通。
 
 ---

@@ -966,3 +966,108 @@ zero-F1 labels count
 ```
 
 当前 exact mined rules 对 Macro-F1 有小幅帮助：`0.535373 -> 0.538537`，但提升有限，说明仍有大量长尾 CVE 没有被覆盖。
+
+## 14. 2026-06-26 追加优化进展：per-label 评估与多标签输出实验
+
+本轮按计划先补 per-label 评估，再实验多标签输出策略。
+
+### 14.1 per-label 评估
+
+新增：
+
+```text
+utils/evaluate_per_label.py
+```
+
+对当前泛化证据较强路线：
+
+```text
+OOF blocklist + wsman-38649 + exact mined rules support=20
+```
+
+统计结果：
+
+```text
+labels: 1311
+zero_f1_labels: 540
+low_f1_labels_lt_0.2: 554
+```
+
+主要 zero-F1 / high-FN CVE 仍包括：
+
+```text
+CVE-2021-20016: fn=403
+CVE-2017-7921:  fn=139
+CVE-2023-27372: fn=91
+CVE-2018-13379: fn=79
+CVE-2024-1800:  fn=73
+CVE-2020-8949:  fn=66
+```
+
+结论：Macro-F1 低的核心仍是大量长尾 CVE 完全未召回。当前优化提升了总体 recall，但没有大规模减少 zero-F1 类别。
+
+### 14.2 多标签输出策略实验
+
+新增：
+
+```text
+utils/experiment_multilabel_strategy.py
+utils/experiment_labelset_completion.py
+```
+
+实验一：top-1 高置信近邻复制完整 labelset。
+
+```text
+thresholds: 0.97,0.98,0.99,0.995,0.999
+require_superset=true
+```
+
+结果：全部略低于 baseline，最佳仍是 baseline。
+
+```text
+best copy-top1:
+micro_f1: 0.746129
+macro_f1: 0.535819
+delta_micro_f1: -0.000570
+delta_macro_f1: -0.002718
+```
+
+实验二：top-k consensus 补充多标签。
+
+```text
+thresholds: 0.90,0.95,0.98,0.99
+min_votes: 2,3,5
+```
+
+结果：全部不优于 baseline，低 vote 会引入大量 FP。
+
+```text
+best consensus:
+micro_f1: 0.746585
+macro_f1: 0.538514
+delta_micro_f1: -0.000113
+delta_macro_f1: -0.000023
+```
+
+实验三：重复高置信 multi-label labelset completion。
+
+在未启用 `wsman-38649` 的 OOF blocklist baseline 上：
+
+```text
+threshold=0.99
+min_votes=2
+require_subset=true
+changed_rows=101
+micro_f1: 0.736626
+macro_f1: 0.536121
+delta_micro_f1: +0.003697
+delta_macro_f1: +0.000748
+```
+
+但在已经启用 `wsman-38649` 的当前基线上，变更为 0。说明该策略主要修复的就是 `/wsman` 四标签截断，已经被训练验证规则覆盖。
+
+结论：
+
+- 全局多标签扩展策略不成立，会引入 FP 或无收益。
+- 多标签问题需要定向 group completion，而不是全局复制近邻 labelset。
+- 当前最稳的做法仍是保留 `wsman-38649` 这种训练验证通过的定向规则。

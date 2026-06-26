@@ -1344,3 +1344,119 @@ top FN labels
 ```
 
 只优化 micro-F1 容易继续偏向高频类；要提升 Macro-F1，需要专门解决长尾 CVE 的召回和多标签输出问题。
+
+## 18. per-label 评估与多标签输出实验
+
+### 18.1 per-label 评估工具
+
+新增：
+
+```text
+utils/evaluate_per_label.py
+```
+
+该工具输出每个 CVE 的：
+
+```text
+tp/fp/fn/support/predicted/precision/recall/f1
+```
+
+并统计：
+
+```text
+zero_f1_labels
+low_f1_labels_lt_0.2
+top FN labels
+```
+
+当前泛化证据较强路线的结果：
+
+```text
+labels: 1311
+zero_f1_labels: 540
+low_f1_labels_lt_0.2: 554
+```
+
+这验证了 Macro-F1 低的判断：不是少数标签问题，而是大量长尾标签完全未召回。
+
+### 18.2 全局多标签策略失败
+
+新增：
+
+```text
+utils/experiment_multilabel_strategy.py
+```
+
+实验过两类全局策略。
+
+第一类：top-1 高置信近邻复制完整 labelset。
+
+```text
+thresholds: 0.97,0.98,0.99,0.995,0.999
+require_superset=true
+```
+
+最佳结果仍低于 baseline：
+
+```text
+micro_f1: 0.746129
+macro_f1: 0.535819
+delta_micro_f1: -0.000570
+delta_macro_f1: -0.002718
+```
+
+第二类：top-k consensus 补充标签。
+
+```text
+thresholds: 0.90,0.95,0.98,0.99
+min_votes: 2,3,5
+```
+
+最佳结果仍低于 baseline：
+
+```text
+micro_f1: 0.746585
+macro_f1: 0.538514
+delta_micro_f1: -0.000113
+delta_macro_f1: -0.000023
+```
+
+结论：全局放宽多标签输出不可行。它会引入 FP，或者只产生微弱且不稳定的变化。
+
+### 18.3 定向 labelset completion
+
+新增：
+
+```text
+utils/experiment_labelset_completion.py
+```
+
+在未启用 `wsman-38649` 的 OOF blocklist baseline 上：
+
+```text
+threshold=0.99
+min_votes=2
+require_subset=true
+changed_rows=101
+precision: 0.759847
+recall:    0.714782
+micro_f1:  0.736626
+macro_f1:  0.536121
+delta_micro_f1: +0.003697
+delta_macro_f1: +0.000748
+```
+
+但在当前已经启用 `wsman-38649` 的基线上，变更为 0。说明 labelset completion 的主要收益就是修复 `/wsman` 四标签截断；这已经被训练验证通过的 `wsman-38649` 定向规则覆盖。
+
+### 18.4 当前判断
+
+多标签输出优化不能做成全局策略，应做成“有训练证据的定向 group completion”。当前最稳的结论：
+
+```text
+保留 wsman-38649
+不启用全局 copy-top1
+不启用全局 consensus
+后续若做 group completion，必须从训练 OOF 中学习 group 规则
+```
+
+Macro-F1 方面，当前最大问题仍是 `zero_f1_labels=540`。后续提升 Macro-F1 的重点不是多标签全局放宽，而是长尾 CVE 的规则挖掘、训练覆盖和 per-label 策略。

@@ -537,3 +537,58 @@ Macro-F1 问题已记录：当前 Macro-F1 远低于 Micro-F1，说明长尾 CVE
 1. 增加 per-label 评估脚本，输出 zero-F1 CVE 数、低 F1 CVE top 列表。
 2. 做多标签输出策略优化，优先解决 `CVE-2021-38649` 这类“近邻已命中但输出截断”的问题。
 3. 将 mined path rules 配置化，而不是硬编码在脚本逻辑里。
+
+## 11. 2026-06-26 执行记录：per-label 与多标签策略
+
+已实现：
+
+```text
+utils/evaluate_per_label.py
+utils/experiment_multilabel_strategy.py
+utils/experiment_labelset_completion.py
+```
+
+当前泛化证据较强路线的 per-label 诊断：
+
+```text
+labels: 1311
+zero_f1_labels: 540
+low_f1_labels_lt_0.2: 554
+```
+
+全局多标签策略实验：
+
+```text
+copy-top1 best:
+micro_f1: 0.746129
+macro_f1: 0.535819
+delta_micro_f1: -0.000570
+
+consensus best:
+micro_f1: 0.746585
+macro_f1: 0.538514
+delta_micro_f1: -0.000113
+```
+
+定向 labelset completion：
+
+```text
+在 OOF blocklist baseline 上:
+micro_f1: 0.736626
+delta_micro_f1: +0.003697
+
+在当前已启用 wsman-38649 的基线上:
+changed_rows: 0
+```
+
+结论：
+
+- 全局多标签扩展策略不成立。
+- 多标签问题应保留为训练验证通过的定向 group completion。
+- 当前 Macro-F1 的主要瓶颈是大量 zero-F1 长尾 CVE，不是简单放宽多标签输出。
+
+下一步建议：
+
+1. 基于 `evaluate_per_label.py` 做 zero-F1 CVE 分组，优先处理 support 高的 zero-F1 类。
+2. 从训练集中为高 support zero-F1 类挖专属 exact path/query/body 规则。
+3. 做规则配置化，避免继续增加硬编码脚本参数。
