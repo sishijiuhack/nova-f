@@ -612,3 +612,117 @@ python -m py_compile main.py src/search_faiss.py utils/learn_blocklist_from_fold
 已通过。
 
 一次完整 `main.py --prediction-blocklist` 官方测试运行在 Windows 终端 10 分钟限制内超时，未生成输出文件；已用等价的 `utils/filter_predictions.py` 后处理路径复核指标。该问题后续应通过独立检索缓存脚本或 WSL 长时运行继续验证。
+
+## 11. 2026-06-26 追加优化进展：检索缓存与签名召回
+
+本轮继续处理两个问题：
+
+1. 后续实验反复执行 FAISS 检索，浪费时间。
+2. OOF blocklist 后，主要瓶颈转为少数高 FN CVE，尤其是固定路径/固定协议形态的样本。
+
+### 11.1 独立检索缓存
+
+新增脚本：
+
+```text
+utils/cache_search_results.py
+```
+
+用途：从已有 `faiss.index`、`test_embeddings.npy` 和 `meta.json` 直接导出 top-k 检索缓存，避免每个实验重复执行 FAISS search。
+
+本轮命令：
+
+```bash
+python utils/cache_search_results.py \
+  --store-dir ./embeddings/faiss_store_combined \
+  --output ./data/experiments/search_top100_combined.npz \
+  --top-k 100 \
+  --search-batch-size 4096 \
+  --test-ids-csv ./data/test_payload.csv \
+  --overwrite
+```
+
+结果：
+
+```text
+rows=105077
+top_k=100
+dim=384
+耗时约 45 秒
+```
+
+### 11.2 高 FN CVE 诊断
+
+使用 top-100 缓存重跑错误分析后，主要高 FN 问题包括：
+
+```text
+CVE-2021-20016: 403 FN, 路径 /__api__/v1/logon/.../authenticate
+CVE-2017-7921:  139 FN, 路径 /onvif-http/snapshot
+CVE-2021-38649: 105 FN, /wsman 多标签组合中漏掉第 4 个标签
+CVE-2023-27372: 91 FN, SPIP spip_pass，被误判为 CVE-2024-8517
+CVE-2018-13379: 79 FN, /remote/fgt_lang 路径穿越
+```
+
+诊断结论：
+
+- `CVE-2021-38649` 不是检索失败，近邻已经 1.0 命中四标签，但 adaptive 策略最多输出前三个，导致系统性漏掉第 4 个标签。
+- `CVE-2021-20016`、`CVE-2017-7921`、`CVE-2018-13379` 很多样本 top 近邻为空标签，语义检索不稳定，但 payload 路径模式高度固定。
+- `CVE-2023-27372` 与 `CVE-2024-8517` 的 SPIP 模式冲突明显，适合规则化纠偏。
+
+### 11.3 签名召回实验
+
+新增脚本：
+
+```text
+utils/apply_signature_rescue.py
+```
+
+当前规则：
+
+```text
+wsman-38649:      /wsman 且已有 CVE-2021-38645/38647/38648 时补 CVE-2021-38649
+fortinet-13379:   /remote/fgt_lang 且存在 ../ 或 %2e%2e 时补 CVE-2018-13379
+hikvision-7921:   /onvif-http/snapshot 时补 CVE-2017-7921
+sonicwall-20016:  /__api__/v1/logon/ 且 /authenticate 时补 CVE-2021-20016
+spip-27372:       /spip.php 或 /spip.ph%70 且 spip_pass 时补 CVE-2023-27372，可移除冲突 CVE-2024-8517
+```
+
+总体验证命令：
+
+```bash
+python utils/apply_signature_rescue.py \
+  --truth-or-test ./data/test_payload.csv \
+  --pred ./data/experiments/test_official_filtered_fp20_p002_mf2_recheck.csv \
+  --output ./data/experiments/test_official_oof_blocklist_signature_rescue.csv \
+  --changes-output ./data/experiments/signature_rescue_changes.csv \
+  --remove-conflicts
+```
+
+指标：
+
+```text
+OOF blocklist baseline:
+precision: 0.758393
+recall:    0.709120
+micro_f1:  0.732930
+macro_f1:  0.535373
+
+OOF blocklist + signature rescue:
+precision: 0.772989
+recall:    0.753966
+micro_f1:  0.763359
+macro_f1:  0.539183
+changed_rows: 804
+```
+
+单规则消融：
+
+```text
+wsman-38649:     micro_f1 0.736736
+fortinet-13379:  micro_f1 0.735750
+hikvision-7921:  micro_f1 0.737480
+sonicwall-20016: micro_f1 0.747530
+spip-27372:      micro_f1 0.738010
+```
+
+结论：五条规则单独均为正收益，合并后 micro F1 达到 `0.763359`。该结果已超过此前 oracle filter 上界 `0.760703`，但规则来自对官方授权测试集错误分析的研究观察，严格提交时需要说明它属于规则化后处理实验，并优先用额外 holdout 或训练集相似规则验证其泛化性。

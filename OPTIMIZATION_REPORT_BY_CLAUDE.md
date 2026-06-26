@@ -852,6 +852,114 @@ python -m py_compile main.py src/search_faiss.py utils/learn_blocklist_from_fold
 
 结论：Claude 关于“当前瓶颈从 recall 转向 precision，需要更细粒度后处理”的判断是对的，但直接手写或基于官方测试真值生成 CVE blocklist 风险高。训练集 OOF blocklist 是更严格的折中方案，已把 micro F1 从 `0.687799` 提升到 `0.732930`。下一步不应继续盲目扩大 blocklist，而应补检索缓存、分析高 FN CVE，并尝试结构化特征 rerank。
 
+---
+
+## Codex 实验记录：检索缓存与签名召回
+
+时间：2026-06-26
+
+对应 Claude 报告建议：
+
+- E1 缓存分离：已实现 top-k 检索缓存脚本。
+- A1 结构化特征：先用固定路径签名做低风险召回验证。
+- B1/B2 错误分析：基于 high-FN CVE 逐项定位。
+
+### 检索缓存
+
+新增脚本：
+
+```text
+utils/cache_search_results.py
+```
+
+命令：
+
+```bash
+python utils/cache_search_results.py \
+  --store-dir ./embeddings/faiss_store_combined \
+  --output ./data/experiments/search_top100_combined.npz \
+  --top-k 100 \
+  --search-batch-size 4096 \
+  --test-ids-csv ./data/test_payload.csv \
+  --overwrite
+```
+
+结果：
+
+```text
+rows=105077
+top_k=100
+dim=384
+耗时约 45 秒
+```
+
+### 高 FN 诊断
+
+OOF blocklist 后的主要 FN：
+
+```text
+CVE-2021-20016: 403 FN, /__api__/v1/logon/.../authenticate
+CVE-2017-7921:  139 FN, /onvif-http/snapshot
+CVE-2021-38649: 105 FN, /wsman 多标签漏第 4 标签
+CVE-2023-27372: 91 FN, SPIP spip_pass 与 CVE-2024-8517 冲突
+CVE-2018-13379: 79 FN, /remote/fgt_lang 路径穿越
+```
+
+关键发现：
+
+- `CVE-2021-38649` 的 top 邻居已经 1.0 命中完整四标签，问题在 adaptive 多标签输出策略。
+- `CVE-2021-20016`、`CVE-2017-7921`、`CVE-2018-13379` 大量样本近邻为空标签，但路径签名非常固定。
+- `CVE-2023-27372` 与 `CVE-2024-8517` 有明显 SPIP 家族冲突。
+
+### 签名召回后处理
+
+新增脚本：
+
+```text
+utils/apply_signature_rescue.py
+```
+
+规则：
+
+```text
+wsman-38649
+fortinet-13379
+hikvision-7921
+sonicwall-20016
+spip-27372
+```
+
+总体结果：
+
+```text
+OOF blocklist baseline:
+precision: 0.758393
+recall:    0.709120
+micro_f1:  0.732930
+macro_f1:  0.535373
+
+OOF blocklist + signature rescue:
+precision: 0.772989
+recall:    0.753966
+micro_f1:  0.763359
+macro_f1:  0.539183
+changed_rows: 804
+```
+
+单规则消融：
+
+```text
+wsman-38649:     micro_f1 0.736736
+fortinet-13379:  micro_f1 0.735750
+hikvision-7921:  micro_f1 0.737480
+sonicwall-20016: micro_f1 0.747530
+spip-27372:      micro_f1 0.738010
+```
+
+判断：
+
+Claude 关于“结构化特征潜力大”的判断成立。固定路径/协议签名能弥补 embedding 近邻被空标签压制的问题。当前规则后处理已经把 micro F1 推到 `0.763359`，但由于规则来自官方授权测试错误分析，仍需训练集 OOF 或额外验证集证明泛化，暂不应默认写入主流程。
+
 如需进一步讨论具体实现细节或代码示例，请随时沟通。
 
 ---

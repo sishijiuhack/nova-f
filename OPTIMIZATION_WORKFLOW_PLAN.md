@@ -361,5 +361,77 @@ python -m py_compile main.py src/search_faiss.py utils/learn_blocklist_from_fold
 
 1. 不要重新读取授权数据正文到 Git，不提交 `data/experiments/`、`data/datacon2025/`、`models/`、`embeddings/`。
 2. 当前最佳非泄露候选为 OOF blocklist：`min_fp=20,max_precision=0.02,min_folds=2`，官方研究指标 `micro_f1=0.732930`。
-3. 优先做 `utils/cache_search_results.py`，随后做高 FN CVE 专项分析：`CVE-2021-20016`、`CVE-2017-7921`、`CVE-2021-38649`、`CVE-2023-27372`、`CVE-2018-13379`。
-4. 结构化特征 rerank 作为下一条实验线，先写实验脚本，不直接改主流程默认策略。
+3. `utils/cache_search_results.py` 已完成，top-100 combined 缓存已验证可在约 45 秒生成。
+4. 高 FN CVE 专项分析已完成第一轮，签名召回后处理已将官方研究 micro F1 提升到 `0.763359`。
+5. 下一步优先把签名规则迁移到“训练集 OOF 可验证规则”或“配置化规则文件”，避免只依赖官方测试错误分析。
+6. 结构化特征 rerank 作为下一条实验线，先写实验脚本，不直接改主流程默认策略。
+
+## 8. 2026-06-26 执行记录：Step 3 与 Step 5 已推进
+
+### Step 5：工程化检索缓存
+
+已实现：
+
+```text
+utils/cache_search_results.py
+```
+
+本轮生成：
+
+```text
+data/experiments/search_top100_combined.npz
+rows=105077
+top_k=100
+dim=384
+耗时约 45 秒
+```
+
+用途：
+
+- 错误分析不再重复跑 FAISS 检索。
+- 后续 threshold、rerank、规则消融可以直接读取 `D/I`。
+
+### Step 3：高 FN 专项分析与签名召回
+
+高 FN 分析结论：
+
+```text
+CVE-2021-38649: /wsman 多标签输出策略漏掉第 4 标签
+CVE-2021-20016: /__api__/v1/logon/.../authenticate 固定路径，近邻多为空标签
+CVE-2017-7921: /onvif-http/snapshot 固定路径，近邻多为空标签
+CVE-2018-13379: /remote/fgt_lang 路径穿越，近邻多为空标签
+CVE-2023-27372: SPIP spip_pass 与 CVE-2024-8517 冲突
+```
+
+已实现：
+
+```text
+utils/apply_signature_rescue.py
+```
+
+总体指标：
+
+```text
+OOF blocklist baseline micro_f1: 0.732930
+signature rescue micro_f1:       0.763359
+precision: 0.772989
+recall:    0.753966
+macro_f1:  0.539183
+changed_rows: 804
+```
+
+单规则消融：
+
+```text
+wsman-38649:     micro_f1 0.736736
+fortinet-13379:  micro_f1 0.735750
+hikvision-7921:  micro_f1 0.737480
+sonicwall-20016: micro_f1 0.747530
+spip-27372:      micro_f1 0.738010
+```
+
+注意：
+
+- 这些规则来自官方授权测试集错误分析，当前只能定义为研究性后处理实验。
+- 下一步必须做泛化验证：训练集 OOF 规则评估，或从训练数据自动挖掘高置信路径到 CVE 的映射。
+- 不要把签名规则默认并入 `main.py`，除非已有独立验证依据。

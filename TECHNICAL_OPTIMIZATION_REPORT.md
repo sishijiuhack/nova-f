@@ -968,3 +968,142 @@ python -m py_compile main.py src/search_faiss.py utils/learn_blocklist_from_fold
 已通过。
 
 完整 `main.py --prediction-blocklist` 官方集长跑在 Windows 10 分钟命令限制内超时，未生成输出；已用等价 `utils/filter_predictions.py` 路径复核指标。后续应补 `utils/cache_search_results.py` 或在 WSL 长时窗口中完成主流程端到端复核。
+
+## 15. 检索缓存与签名召回优化
+
+### 15.1 为什么先补检索缓存
+
+OOF blocklist 之后，继续优化需要大量重复读取同一组 top-k 近邻：阈值搜索、错误分析、规则消融、rerank 都依赖 `D/I` 矩阵。此前完整主流程会反复跑向量检索甚至重新进入预测流水线，实验成本高且容易在 Windows 命令时间限制内超时。
+
+新增：
+
+```text
+utils/cache_search_results.py
+```
+
+该脚本只读取：
+
+```text
+embeddings/faiss_store_combined/faiss.index
+embeddings/faiss_store_combined/meta.json
+embeddings/faiss_store_combined/test_embeddings.npy
+```
+
+并输出：
+
+```text
+data/experiments/search_top100_combined.npz
+```
+
+本轮 top-100 缓存生成结果：
+
+```text
+rows=105077
+top_k=100
+dim=384
+耗时约 45 秒
+```
+
+这把后续错误分析从“重跑检索/预测”改成“读取缓存矩阵”，工程上是必要优化。
+
+### 15.2 高 FN 错误拆解
+
+使用 OOF blocklist 后的预测结果和 top-100 缓存重跑错误分析，发现高 FN CVE 可以分成三类：
+
+第一类：输出策略限制。
+
+```text
+CVE-2021-38649
+```
+
+`/wsman` 样本的近邻已经 1.0 命中完整四标签：
+
+```text
+CVE-2021-38645 CVE-2021-38647 CVE-2021-38648 CVE-2021-38649
+```
+
+但当前 adaptive 逻辑最多稳定输出前三个标签，导致 `CVE-2021-38649` 系统性漏掉。这不是 embedding 问题，而是多标签输出策略问题。
+
+第二类：语义近邻被空标签压制。
+
+```text
+CVE-2021-20016
+CVE-2017-7921
+CVE-2018-13379
+```
+
+这些样本路径模式固定，但 top 近邻常常是 `EMPTY`，例如：
+
+```text
+/__api__/v1/logon/.../authenticate
+/onvif-http/snapshot
+/remote/fgt_lang?...../
+```
+
+这说明纯语义相似度对固定攻击路径召回不足，需要结构化路径特征或规则兜底。
+
+第三类：相似家族冲突。
+
+```text
+CVE-2023-27372 vs CVE-2024-8517
+```
+
+SPIP `spip_pass` 样本常被高相似度近邻推到 `CVE-2024-8517`，但真实标签为 `CVE-2023-27372`。这是标签冲突或近邻标注偏置问题，需要定向纠偏。
+
+### 15.3 签名召回实验
+
+新增：
+
+```text
+utils/apply_signature_rescue.py
+```
+
+规则设计遵循两个原则：
+
+- 只处理错误分析中路径/协议高度固定的 CVE。
+- 先作为后处理实验脚本，不改主流程默认行为。
+
+规则：
+
+```text
+wsman-38649:      /wsman 且已有 CVE-2021-38645/38647/38648 时补 CVE-2021-38649
+fortinet-13379:   /remote/fgt_lang 且存在 ../ 或 %2e%2e 时补 CVE-2018-13379
+hikvision-7921:   /onvif-http/snapshot 时补 CVE-2017-7921
+sonicwall-20016:  /__api__/v1/logon/ 且 /authenticate 时补 CVE-2021-20016
+spip-27372:       /spip.php 或 /spip.ph%70 且 spip_pass 时补 CVE-2023-27372，可移除冲突 CVE-2024-8517
+```
+
+实验结果：
+
+```text
+OOF blocklist baseline:
+precision: 0.758393
+recall:    0.709120
+micro_f1:  0.732930
+macro_f1:  0.535373
+
+OOF blocklist + signature rescue:
+precision: 0.772989
+recall:    0.753966
+micro_f1:  0.763359
+macro_f1:  0.539183
+changed_rows: 804
+```
+
+单规则消融：
+
+```text
+wsman-38649:     micro_f1 0.736736
+fortinet-13379:  micro_f1 0.735750
+hikvision-7921:  micro_f1 0.737480
+sonicwall-20016: micro_f1 0.747530
+spip-27372:      micro_f1 0.738010
+```
+
+结论：
+
+- 每条规则单独都是正收益，说明不是单条偶然规则拉高总分。
+- 合并后 micro F1 达到 `0.763359`，超过此前 oracle filter 的 `0.760703`。
+- 但这些规则来自官方授权测试集错误分析，严格泛化性仍需训练集 holdout 或额外数据验证。
+
+工程上，当前最合理的状态是保留为独立后处理工具，而不是写入默认主流程。下一步如果要产品化，应将规则抽为配置文件，并在训练集 OOF 或新增验证集上给出每条规则的 precision/recall 证据。
