@@ -100,7 +100,7 @@ start_spinner() {
   fi
 
   (
-    frames=('/' '-' '\' '|')
+    frames=("/" "-" "\\" "|")
     i=0
     while true; do
       printf '\r%s[nova-f] running %s%s' "$CYAN" "${frames[$((i % 4))]}" "$RESET" >&2

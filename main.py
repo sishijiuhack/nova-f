@@ -12,6 +12,7 @@ try:
     import numpy as np
     import pandas as pd
     import faiss
+    from tqdm import tqdm
     from src import build_faiss as build_mod
     from src import preprocess as preprocess_mod
     from src import search_faiss as search_mod
@@ -20,6 +21,7 @@ except Exception:
         np = None
         pd = None
         faiss = None
+        tqdm = None
         build_mod = None
         preprocess_mod = None
         search_mod = None
@@ -324,7 +326,9 @@ def label_test_payloads(
     blocked_prediction_count = 0
     active_blocklist = prediction_blocklist or set()
 
-    for start in range(0, len(test_vectors), search_batch_size):
+    search_offsets = range(0, len(test_vectors), search_batch_size)
+    progress = tqdm(search_offsets, desc="Searching and predicting", unit="batch")
+    for start in progress:
         end = min(start + search_batch_size, len(test_vectors))
         batch_vectors = test_vectors[start:end]
         D, I = index.search(batch_vectors, top_k)
