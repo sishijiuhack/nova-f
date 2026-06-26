@@ -17,6 +17,7 @@ print_logo() {
   / |/ / __ \ | / / _ |   ____  / __/
  /    / /_/ / |/ / __ |  /___/ / _/
 /_/|_/\____/|___/_/ |_|       /_/
+No-cost On-site Vulnerability Analyzer - Fast
 EOF
 }
 
@@ -85,6 +86,55 @@ ok() {
   echo -e "${GREEN}[nova-f] $*${RESET}"
 }
 
+SPINNER_PID=""
+
+clear_spinner_line() {
+  if [[ -t 2 ]]; then
+    printf '\r\033[K' >&2
+  fi
+}
+
+start_spinner() {
+  if [[ ! -t 2 || -n "${SPINNER_PID:-}" ]]; then
+    return 0
+  fi
+
+  (
+    frames=('/' '-' '\' '|')
+    i=0
+    while true; do
+      printf '\r%s[nova-f] running %s%s' "$CYAN" "${frames[$((i % 4))]}" "$RESET" >&2
+      i=$((i + 1))
+      sleep 0.2
+    done
+  ) &
+  SPINNER_PID=$!
+}
+
+stop_spinner() {
+  if [[ -n "${SPINNER_PID:-}" ]]; then
+    kill "$SPINNER_PID" >/dev/null 2>&1 || true
+    wait "$SPINNER_PID" >/dev/null 2>&1 || true
+    SPINNER_PID=""
+    clear_spinner_line
+  fi
+}
+
+run_with_spinner() {
+  local exit_code
+
+  start_spinner
+  set +e
+  "${CMD[@]}" \
+    > >(while IFS= read -r line; do clear_spinner_line; printf '%s\n' "$line"; done) \
+    2> >(while IFS= read -r line; do clear_spinner_line; printf '%s\n' "$line" >&2; done)
+  exit_code=$?
+  set -e
+  stop_spinner
+
+  return "$exit_code"
+}
+
 debug_tips() {
   cat >&2 <<EOF
 ${RED}[nova-f] Debug checklist:
@@ -97,7 +147,7 @@ ${RED}[nova-f] Debug checklist:
 EOF
 }
 
-trap 'code=$?; echo -e "${RED}[nova-f] command failed with exit code ${code}${RESET}" >&2; debug_tips; exit "$code"' ERR
+trap 'code=$?; stop_spinner; echo -e "${RED}[nova-f] command failed with exit code ${code}${RESET}" >&2; debug_tips; exit "$code"' ERR
 
 MODE="precision"
 TRAIN="./data/train_with_ultimate.csv"
@@ -281,5 +331,5 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
   exit 0
 fi
 
-"${CMD[@]}"
+run_with_spinner
 ok "output written: $OUTPUT"
