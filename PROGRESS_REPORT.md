@@ -77,6 +77,8 @@ models/all-MiniLM-L6-v2
 - `utils/evaluate_predictions.py`：本地计算 `exact_match`、`precision`、`recall`、`micro_f1`、`macro_f1`。
 - `utils/merge_training_csv.py`：合并扩展训练集和官方训练集，用于构建 combined 索引。
 - `utils/tune_retrieval_params.py`：基于缓存 top-k 检索结果进行阈值和负证据参数搜索。
+- `utils/analyze_errors.py`：按 CVE 统计 FP/FN/TP、precision/recall/F1，并输出 payload 模式和近邻证据。
+- `utils/filter_predictions.py`：对最终预测结果做可配置 CVE 过滤，用于验证低精度高 FP 标签的后处理策略。
 - `src/search_faiss.py`：新增 CVE 候选聚合、空标签近邻负证据抑制。
 - `main.py`：主流水线接入负证据抑制参数，并更新默认阈值。
 - `src/preprocess.py`：修复 `NaN`/`None`/`null` 被错误归一化为标签的问题。
@@ -286,7 +288,129 @@ macro_f1:       0.377220
 - E5 small 当前不适配 payload 检索任务，暂不进入全量实验。
 - 当前最大收益仍来自 combined 索引、CVE 聚合和空标签近邻负证据抑制。
 
-## 6. 推荐运行命令
+## 6. Claude 报告审阅后的新实验
+
+用户提供 `OPTIMIZATION_REPORT_BY_CLAUDE.md` 后，对其中建议做了审阅和实验验证。
+
+### 6.1 方向判断
+
+认可：
+
+- 当前瓶颈主要是 precision 和系统性误报。
+- 模型替换不是当前第一优先级。
+- 错误分析、per-CVE 策略和结构化特征值得继续。
+
+保留意见：
+
+- 报告中 `+3%~8% F1` 的收益预估偏乐观。
+- “按训练频次直接调整阈值”过于粗糙。
+- 伪标签、多模型集成、GPU FAISS 应放到后面。
+
+### 6.2 错误分析结果
+
+当前最佳预测的错误分析输出：
+
+```text
+data/experiments/error_summary_current.csv
+data/experiments/error_examples_current.csv
+```
+
+Top FP：
+
+```text
+CVE-2021-44228: tp=32, fp=1090, fn=6, precision=0.0285
+CVE-2022-4260 : tp=0,  fp=1071, fn=0, precision=0
+CVE-2022-31181: tp=0,  fp=1070, fn=0, precision=0
+CVE-2010-1340 : tp=7,  fp=124,  fn=0, precision=0.0534
+CVE-2010-0944 : tp=6,  fp=120,  fn=0, precision=0.0476
+CVE-2010-3426 : tp=7,  fp=112,  fn=0, precision=0.0588
+```
+
+Top FN：
+
+```text
+CVE-2021-20016: tp=0,   fp=0, fn=403
+CVE-2017-16894: tp=43,  fp=7, fn=196
+CVE-2017-7921 : tp=0,   fp=0, fn=139
+CVE-2024-21887: tp=645, fp=2, fn=111
+CVE-2023-46805: tp=649, fp=0, fn=107
+CVE-2021-38649: tp=0,   fp=0, fn=105
+```
+
+结论：误报高度集中，少数 CVE 是主要优化空间。
+
+### 6.3 Per-CVE 阈值实验
+
+频次启发式实验：
+
+```text
+baseline micro_f1: 0.687799
+best frequency heuristic: 0.687839
+```
+
+结论：按训练频次简单调整阈值基本无效。
+
+错误驱动候选阈值实验：
+
+```text
+best candidate-threshold strategy
+precision: 0.678793
+recall:    0.710186
+micro_f1:  0.694135
+macro_f1:  0.519895
+```
+
+结论：候选阶段提高低精度 CVE 阈值有小幅收益，但不是主要突破口。
+
+### 6.4 最终输出级过滤实验
+
+使用当前错误分析表选择：
+
+```text
+fp>=50
+precision<=0.05
+```
+
+过滤标签：
+
+```text
+CVE-2010-0944
+CVE-2020-3952
+CVE-2021-44228
+CVE-2022-31181
+CVE-2022-4260
+CVE-2023-34048
+CVE-2024-8517
+```
+
+过滤后：
+
+```text
+baseline
+precision: 0.666632
+recall:    0.710354
+micro_f1:  0.687799
+macro_f1:  0.523245
+
+filtered
+precision: 0.821659
+recall:    0.708167
+micro_f1:  0.760703
+macro_f1:  0.524682
+```
+
+该结果是 oracle 上界，因为 blocklist 来自官方测试真值，不能作为严格无泄漏最终策略。
+
+半分验证：
+
+```text
+A -> B delta_micro: +0.084919
+B -> A delta_micro: +0.085423
+```
+
+结论：输出级 blocklist/filter 是当前最有潜力方向。下一步要做训练集 holdout/K-fold 学习 blocklist 或 penalty，再应用到官方测试集。
+
+## 7. 推荐运行命令
 
 先合并训练集：
 
@@ -341,17 +465,41 @@ python main.py \
   --overwrite-index
 ```
 
-## 7. 后续优化方向
+错误分析：
+
+```bash
+python utils/analyze_errors.py \
+  --truth ./data/test_payload.csv \
+  --pred ./data/experiments/test_official_optimized.csv \
+  --search ./data/experiments/search_top50_combined.npz \
+  --meta ./embeddings/faiss_store_combined/meta.json \
+  --output-summary ./data/experiments/error_summary_current.csv \
+  --output-examples ./data/experiments/error_examples_current.csv
+```
+
+最终输出过滤实验：
+
+```bash
+python utils/filter_predictions.py \
+  --pred ./data/experiments/test_official_optimized.csv \
+  --analysis-summary ./data/experiments/error_summary_current.csv \
+  --min-fp 50 \
+  --max-precision 0.05 \
+  --output ./data/experiments/test_official_filtered_fp50_p005.csv
+```
+
+## 8. 后续优化方向
 
 优先级建议：
 
-1. 按 CVE 频次或类别设定动态阈值，降低热门 CVE 的误报。
-2. 对高频误报 CVE 做错误分析，检查是否存在训练样本标签污染。
-3. 在 GPU 或更长运行窗口下尝试 `bge-base-en-v1.5`、`e5-base-v2` 或安全领域模型。
-4. 将 FAISS 检索缓存和预测缓存拆开为正式命令，减少重复 CPU 检索时间。
-5. 对 payload 结构增加显式特征，例如请求方法、路径、参数名和 body 模式。
+1. 做训练集 holdout/K-fold，从非官方测试真值中学习低精度高 FP CVE blocklist/penalty。
+2. 将最终输出级 filter 转成可配置主流程选项，但默认关闭，避免无验证策略污染正式结果。
+3. 对 `CVE-2021-20016`、`CVE-2017-7921` 等高 FN 类做召回专项分析。
+4. 对 payload 结构增加显式特征，例如请求方法、路径、参数名和 body 模式，用于 rerank 或输出级校准。
+5. 将 FAISS 检索缓存和预测缓存拆开为正式命令，减少重复 CPU 检索时间。
+6. 在 GPU 或更长运行窗口下尝试 `bge-base-en-v1.5`、`e5-base-v2` 或安全领域模型。
 
-## 8. Git 与数据管理
+## 9. Git 与数据管理
 
 以下内容不参与上传：
 

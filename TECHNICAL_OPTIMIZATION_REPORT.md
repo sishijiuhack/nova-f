@@ -664,3 +664,217 @@ intfloat/e5-base-v2
 ```
 
 但前提是先准备 GPU 或接受较长 CPU 编码时间；否则全量 72k+105k 编码成本会很高。
+
+## 13. Claude 报告审阅与错误分析实验
+
+在用户提供 `OPTIMIZATION_REPORT_BY_CLAUDE.md` 后，对其中建议做了技术审阅。总体判断：
+
+- 报告中“当前瓶颈已从召回转向精准率”“模型不是主要限制”“动态阈值、错误分析、结构化特征值得尝试”的方向基本正确。
+- 报告对收益预估偏乐观，尤其是“3-8 个百分点”需要实验验证。
+- “按训练频次粗暴调整 CVE 阈值”的建议不应直接采用。
+- 伪标签、多模型集成、GPU FAISS 更适合作为中长期方向，不适合作为当前第一优先级。
+
+因此后续计划调整为：
+
+```text
+错误分析 -> per-CVE 阈值/过滤实验 -> 结构化特征 rerank -> 工程化缓存和测试
+```
+
+### 13.1 错误分析工具
+
+新增：
+
+```text
+utils/analyze_errors.py
+```
+
+功能：
+
+- 统计每个 CVE 的 `tp/fp/fn/precision/recall/f1`。
+- 输出 FP/FN top CVE。
+- 摘要 payload 中的 method、path、可疑 token。
+- 可选读取 top-k 检索缓存和 `meta.json`，输出近邻标签证据。
+
+当前最佳预测的错误分析输出：
+
+```text
+data/experiments/error_summary_current.csv
+data/experiments/error_examples_current.csv
+```
+
+关键发现：
+
+```text
+CVE-2021-44228: tp=32, fp=1090, fn=6, precision=0.0285
+CVE-2022-4260 : tp=0,  fp=1071, fn=0, precision=0
+CVE-2022-31181: tp=0,  fp=1070, fn=0, precision=0
+CVE-2010-1340 : tp=7,  fp=124,  fn=0, precision=0.0534
+CVE-2010-0944 : tp=6,  fp=120,  fn=0, precision=0.0476
+CVE-2010-3426 : tp=7,  fp=112,  fn=0, precision=0.0588
+```
+
+False Negative 也集中：
+
+```text
+CVE-2021-20016: tp=0,   fp=0, fn=403
+CVE-2017-16894: tp=43,  fp=7, fn=196
+CVE-2017-7921 : tp=0,   fp=0, fn=139
+CVE-2024-21887: tp=645, fp=2, fn=111
+CVE-2023-46805: tp=649, fp=0, fn=107
+CVE-2021-38649: tp=0,   fp=0, fn=105
+```
+
+结论：当前误报不是均匀分布，而是少数 CVE 系统性误报。后续优化应围绕这些 CVE 做校准。
+
+### 13.2 频次启发式动态阈值实验
+
+实验文件：
+
+```text
+data/experiments/dynamic_threshold_frequency_results.csv
+```
+
+策略：
+
+- 高频 CVE 上调阈值。
+- 长尾 CVE 下调阈值。
+- 搜索多个高频/低频 cutoff 和 offset。
+
+结果：
+
+```text
+baseline_dynamic_impl
+precision: 0.666632
+recall:    0.710354
+micro_f1:  0.687799
+macro_f1:  0.523245
+
+best frequency heuristic: highfreq>=50 +0.02
+precision: 0.668945
+recall:    0.707831
+micro_f1:  0.687839
+macro_f1:  0.522532
+```
+
+结论：频次启发式几乎无收益，`micro_f1` 只提升 `0.000040`，可以视为噪声级变化。Claude 报告中“高频 CVE 阈值上调、长尾 CVE 阈值下调”的简单版本不应作为主线。
+
+### 13.3 错误驱动候选阈值实验
+
+实验文件：
+
+```text
+data/experiments/error_driven_threshold_results.csv
+```
+
+策略：
+
+- 从当前错误分析中选择 `fp>=50` 且低 precision 的 CVE。
+- 在候选聚合阶段对这些 CVE 提高阈值到 `0.88~1.01`。
+
+最佳结果：
+
+```text
+labels:    fp>=50 & precision<=0.10 的 9 个 CVE
+threshold: 0.98
+precision: 0.678793
+recall:    0.710186
+micro_f1:  0.694135
+macro_f1:  0.519895
+```
+
+结论：候选阶段阈值能提升 precision，但收益有限，说明问题不只是“候选进不进来”，还涉及多标签排序和最终输出策略。
+
+### 13.4 最终输出级过滤实验
+
+新增：
+
+```text
+utils/filter_predictions.py
+```
+
+用当前错误分析表选择：
+
+```text
+fp>=50
+precision<=0.05
+```
+
+被过滤标签：
+
+```text
+CVE-2010-0944
+CVE-2020-3952
+CVE-2021-44228
+CVE-2022-31181
+CVE-2022-4260
+CVE-2023-34048
+CVE-2024-8517
+```
+
+过滤后结果：
+
+```text
+baseline
+precision: 0.666632
+recall:    0.710354
+micro_f1:  0.687799
+macro_f1:  0.523245
+
+filtered fp>=50 precision<=0.05
+precision: 0.821659
+recall:    0.708167
+micro_f1:  0.760703
+macro_f1:  0.524682
+```
+
+结论：
+
+- 最终输出级 filter 的潜力明显大于候选阶段阈值。
+- 但该结果使用官方测试真值生成 blocklist，属于 oracle 上界分析，不能直接作为严格无泄漏策略。
+- 它证明当前最大优化空间在“少数 CVE 的系统性误报过滤”。
+
+### 13.5 半分验证
+
+为了验证 filter 不是完全同集偶然，做了官方测试集 A/B 半分实验：
+
+```text
+data/experiments/blocklist_split_validation_details.csv
+data/experiments/blocklist_split_validation_summary.csv
+```
+
+方法：
+
+1. 固定随机种子将官方测试集切成 A/B 两半。
+2. A 半学习 blocklist，B 半评估。
+3. B 半学习 blocklist，A 半评估。
+
+最佳配置：
+
+```text
+min_fp=10
+max_precision=0.10
+```
+
+结果：
+
+```text
+A -> B:
+base_micro:     0.688820
+filtered_micro: 0.773739
+delta_micro:    +0.084919
+precision:      0.666422 -> 0.851227
+recall:         0.712777 -> 0.709181
+
+B -> A:
+base_micro:     0.686778
+filtered_micro: 0.772201
+delta_micro:    +0.085423
+precision:      0.666842 -> 0.854006
+recall:         0.707942 -> 0.704698
+```
+
+结论：
+
+- 半分验证提升稳定，说明高 FP 低 precision CVE 的误报模式较稳定。
+- 但该实验仍使用官方测试集内部真值，仍属于研究分析。
+- 下一步应做真正无泄漏版本：从训练集 holdout/K-fold 学习 blocklist 或 penalty，再应用到官方测试集。
