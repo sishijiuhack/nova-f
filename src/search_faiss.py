@@ -185,6 +185,55 @@ def aggregate_cve_candidates(
     return ranked[:max_candidates], filtered_out
 
 
+def has_cve_label(labels: Sequence[str]) -> bool:
+    return any(str(label).upper().startswith("CVE-") for label in labels)
+
+
+def should_suppress_by_empty_neighbors(
+    idxs: Sequence[int],
+    sims: Sequence[float],
+    train_has_cve: Sequence[bool],
+    *,
+    base_threshold: float,
+    empty_penalty_margin: float,
+    empty_penalty_floor: float,
+    empty_penalty_ratio: float,
+) -> bool:
+    """Use empty-label neighbours as negative evidence.
+
+    Full official training data contains many benign or unlabeled payloads. If
+    those samples are almost as close as the best CVE-bearing neighbour, a CVE
+    prediction is usually a false positive. The ratio guard prevents one weak
+    empty neighbour from suppressing several strong CVE neighbours.
+    """
+    if empty_penalty_margin < 0:
+        return False
+
+    best_cve = -1.0
+    best_empty = -1.0
+    cve_votes = 0
+    empty_votes = 0
+
+    for idx, score in zip(idxs, sims):
+        if idx < 0 or idx >= len(train_has_cve):
+            continue
+        score_float = float(score)
+        if train_has_cve[idx]:
+            best_cve = max(best_cve, score_float)
+            if score_float >= base_threshold:
+                cve_votes += 1
+        else:
+            best_empty = max(best_empty, score_float)
+            if score_float >= empty_penalty_floor:
+                empty_votes += 1
+
+    if best_cve < base_threshold or best_empty < empty_penalty_floor:
+        return False
+
+    required_empty_votes = max(1, int(np.ceil(cve_votes * empty_penalty_ratio)))
+    return (best_cve - best_empty) < empty_penalty_margin and empty_votes >= required_empty_votes
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="使用 FAISS 索引进行离线 CVE 检索")
     parser.add_argument("--test-path", required=True, help="测试集 CSV 路径")
@@ -196,15 +245,18 @@ def main() -> None:
     parser.add_argument("--device", default=None, help="模型加载设备，如 cpu/cuda")
     parser.add_argument("--batch-size", type=int, default=32, help="嵌入批量大小")
     parser.add_argument("--reuse-cache", action="store_true", help="如缓存存在则复用测试向量")
-    parser.add_argument("--top-k", type=int, default=3, help="FAISS 检索的候选数量")
-    parser.add_argument("--max-candidates", type=int, default=3, help="每条样本保留的候选 CVE 数量")
-    parser.add_argument("--base-threshold", type=float, default=0.70, help="基础相似度阈值")
+    parser.add_argument("--top-k", type=int, default=50, help="FAISS 检索的候选数量")
+    parser.add_argument("--max-candidates", type=int, default=5, help="每条样本保留的候选 CVE 数量")
+    parser.add_argument("--base-threshold", type=float, default=0.86, help="基础相似度阈值")
     parser.add_argument("--high-confidence", type=float, default=0.87, help="高置信阈值")
     parser.add_argument("--medium-confidence", type=float, default=0.78, help="中等置信阈值")
     parser.add_argument("--second-gap", type=float, default=0.15, help="第二个候选与第一个的最大差值")
     parser.add_argument("--third-gap", type=float, default=0.05, help="第三个候选与第二个的最大差值")
     parser.add_argument("--min-votes", type=int, default=1, help="CVE aggregate minimum neighbour votes")
     parser.add_argument("--vote-weight", type=float, default=0.015, help="CVE aggregate vote bonus")
+    parser.add_argument("--empty-penalty-margin", type=float, default=0.05, help="Suppress prediction when empty-label neighbours are within this similarity gap; set negative to disable")
+    parser.add_argument("--empty-penalty-floor", type=float, default=0.80, help="Minimum similarity for empty-label negative evidence")
+    parser.add_argument("--empty-penalty-ratio", type=float, default=0.50, help="Required empty-neighbour votes relative to CVE-neighbour votes")
     parser.add_argument("--search-batch-size", type=int, default=512, help="FAISS 检索时的批量大小")
     parser.add_argument("--verbose", action="store_true", help="开启详细日志")
     args = parser.parse_args()
@@ -227,6 +279,7 @@ def main() -> None:
         raise ValueError("元数据缺少 ids 或 cve_labels 信息")
 
     train_labels: List[List[str]] = [normalize_cve_labels(labels) for labels in train_labels_raw]
+    train_has_cve = [has_cve_label(labels) for labels in train_labels]
 
     logging.info("加载 FAISS 索引: %s", index_path)
     index = faiss.read_index(str(index_path))
@@ -307,6 +360,16 @@ def main() -> None:
                 max_diff_second=args.second_gap,
                 max_diff_third=args.third_gap,
             )
+            if preds and should_suppress_by_empty_neighbors(
+                idxs,
+                sims,
+                train_has_cve,
+                base_threshold=args.base_threshold,
+                empty_penalty_margin=args.empty_penalty_margin,
+                empty_penalty_floor=args.empty_penalty_floor,
+                empty_penalty_ratio=args.empty_penalty_ratio,
+            ):
+                preds = []
             pred_counts[len(preds)] = pred_counts.get(len(preds), 0) + 1
             results.append({"id": row_id, "cve_labels": " ".join(preds)})
 

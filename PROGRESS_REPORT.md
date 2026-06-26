@@ -4,56 +4,37 @@
 
 ## 1. 项目目标
 
-nova-f 面向 DataCon 2025「漏洞攻击流量识别」任务，目标是根据 HTTP 请求流量识别对应 CVE 标签。当前实现采用本地离线方案：
+nova-f 面向 DataCon 2025「漏洞攻击流量识别」任务，目标是根据 HTTP 请求流量识别对应 CVE 标签。当前方案是本地离线检索流水线：
 
 1. 清洗 HTTP payload。
-2. 使用 SentenceTransformer 编码 payload。
-3. 使用 FAISS 构建向量索引。
-4. 对测试流量做 top-k 相似检索。
-5. 基于候选 CVE 聚合、相似度阈值和多标签策略输出预测结果。
+2. 使用 `all-MiniLM-L6-v2` 生成文本向量。
+3. 使用 FAISS 内积索引做 top-k 相似检索。
+4. 聚合近邻中的 CVE 候选。
+5. 结合阈值、多标签策略和负样本近邻抑制输出最终标签。
 
-## 2. 已完成工作
+## 2. 数据与环境
 
-### 2.1 WP 与框架理解
-
-已阅读项目 WP。确认原方案核心是：
-
-- 数据清洗。
-- `all-MiniLM-L6-v2` 向量化。
-- FAISS 内积相似度检索。
-- 自适应阈值输出 0 到 3 个 CVE。
-- 通过扩展训练集和外部漏洞知识源提升覆盖率。
-
-### 2.2 官方授权数据接入
-
-授权数据已放置在：
+官方授权数据已放置在：
 
 ```text
 data/datacon2025/datacon2025-xlab-httpcve/data-release/
 ```
 
-包含：
-
-```text
-train.json.gz
-test.json.gz
-```
-
-已通过 `utils/convert_datacon_jsonl.py` 转换为项目 CSV：
+已转换为项目 CSV：
 
 ```text
 data/train_payload.csv
 data/test_payload.csv
 ```
 
-转换结果：
+数据规模：
 
 ```text
 train_payload.csv: 36001 行
 test_payload.csv: 105077 行
 ```
 
-数据字段：
+字段：
 
 ```text
 id
@@ -76,160 +57,58 @@ labeled=1: 50240
 非空 CVE: 15769
 ```
 
-### 2.3 运行环境
-
-已在 WSL conda 环境 `nova-f` 中验证核心依赖：
-
-```text
-faiss
-pandas
-numpy
-sentence-transformers
-```
-
-由于 WSL 中 HuggingFace 证书校验失败，已采用 Windows HuggingFace 缓存复制方式，将模型放置到：
+本地模型路径：
 
 ```text
 models/all-MiniLM-L6-v2
 ```
 
-运行时通过以下参数使用本地模型，避免再次访问 HuggingFace：
+运行时应显式指定：
 
 ```bash
 --model-path ./models/all-MiniLM-L6-v2
 ```
 
-### 2.4 代码优化
+## 3. 已完成代码工作
 
-已新增 CVE 候选聚合逻辑 `aggregate_cve_candidates`。
+已实现或更新：
 
-优化前策略：
+- `utils/convert_datacon_jsonl.py`：将官方 `json.gz` 数据转换为项目 CSV。
+- `utils/evaluate_predictions.py`：本地计算 `exact_match`、`precision`、`recall`、`micro_f1`、`macro_f1`。
+- `utils/merge_training_csv.py`：合并扩展训练集和官方训练集，用于构建 combined 索引。
+- `src/search_faiss.py`：新增 CVE 候选聚合、空标签近邻负证据抑制。
+- `main.py`：主流水线接入负证据抑制参数，并更新默认阈值。
+- `src/preprocess.py`：修复 `NaN`/`None`/`null` 被错误归一化为标签的问题。
 
-- 对 top-k 近邻按顺序遍历。
-- 每个 CVE 首次出现即作为候选。
-- 容易受单个噪声近邻或多标签样本影响。
+## 4. 当前最佳实验结论
 
-优化后策略：
+### 4.1 原始扩展训练集结果
 
-- 跨 top-k 近邻聚合每个 CVE 的最佳相似度。
-- 统计近邻投票次数。
-- 使用最佳相似度加小额投票奖励排序。
-- 支持 `--min-votes` 和 `--vote-weight` 参数。
-
-该逻辑已接入：
-
-```text
-src/search_faiss.py
-main.py
-```
-
-### 2.5 新增工具脚本
-
-新增官方数据转换脚本：
-
-```text
-utils/convert_datacon_jsonl.py
-```
-
-用途：
-
-```bash
-python utils/convert_datacon_jsonl.py \
-  --input ./data/datacon2025/datacon2025-xlab-httpcve/data-release/train.json.gz \
-  --output ./data/train_payload.csv
-```
-
-新增本地评估脚本：
-
-```text
-utils/evaluate_predictions.py
-```
-
-可计算：
-
-```text
-answer_rate
-exact_match
-precision
-recall
-micro_f1
-macro_f1
-```
-
-## 3. 已完成完整预测
-
-使用扩展训练集：
+使用：
 
 ```text
 data/train_with_ultimate.csv
+embeddings/faiss_store
 ```
 
-使用官方测试集：
+官方测试集评估：
 
 ```text
-data/test_payload.csv
-```
-
-运行命令：
-
-```bash
-python main.py \
-  --train-path ./data/train_with_ultimate.csv \
-  --test-path ./data/test_payload.csv \
-  --test-payload-column payload_decoded \
-  --store-dir ./embeddings/faiss_store \
-  --output-path ./ans/test_official_labeled.csv \
-  --model-path ./models/all-MiniLM-L6-v2 \
-  --reuse-cache
-```
-
-运行结果：
-
-```text
-测试样本: 105077
-非空预测: 49902
-空预测: 55175
-
-预测 1 个 CVE: 20886
-预测 2 个 CVE: 21588
-预测 3 个 CVE: 7428
-```
-
-输出文件：
-
-```text
-ans/test_official_labeled.csv
-```
-
-该文件为本地预测结果，不参与 Git 提交。
-
-## 4. 本地评估结果
-
-基于授权数据中的真实 `cve_labels` 做了本地评估。
-
-### 4.1 全量 105077 行
-
-```text
+all_rows
 exact_match: 0.601435
 precision:   0.156417
 recall:      0.757105
 micro_f1:    0.259270
 macro_f1:    0.479125
-```
 
-### 4.2 仅 `labeled=1` 的 50240 行
-
-```text
+labeled=1
 exact_match: 0.733758
 precision:   0.445963
 recall:      0.757105
 micro_f1:    0.561300
 macro_f1:    0.562271
-```
 
-### 4.3 仅真实存在 CVE 的 15769 行
-
-```text
+truth_nonempty_cve
 exact_match: 0.667385
 precision:   0.794891
 recall:      0.757105
@@ -237,49 +116,172 @@ micro_f1:    0.775538
 macro_f1:    0.676249
 ```
 
-## 5. 当前判断
+问题：召回较高，但对 `labeled=0` 和空 CVE 样本误报严重。
 
-当前模型的主要特点：
+### 4.2 combined 全量索引结果
 
-- 对真实存在 CVE 的样本召回较好。
-- 对真实非 CVE 或 `labeled=0` 流量误报较多。
-- 全量 precision 偏低。
-- 下一阶段优化重点不是继续提高召回，而是降低误报。
-
-当前最关键问题：
+已测试将扩展训练集与官方训练集合并构建索引：
 
 ```text
-空样本过滤能力不足。
+embeddings/faiss_store_combined
+训练向量数: 72938
+```
+
+仅使用 combined 索引和 CVE 聚合，不启用负证据抑制时，较优配置：
+
+```text
+base_threshold=0.84
+min_votes=1
+vote_weight=0.015
+```
+
+评估：
+
+```text
+all_rows
+exact_match: 0.899321
+precision:   0.522833
+recall:      0.751556
+micro_f1:    0.616669
+macro_f1:    0.483007
+
+labeled=1
+exact_match: 0.851194
+precision:   0.679765
+recall:      0.751556
+micro_f1:    0.713860
+macro_f1:    0.566028
+```
+
+结论：combined 索引明显优于原始扩展训练集。
+
+### 4.3 当前最佳：combined 索引 + 空标签近邻抑制
+
+新增策略：当空标签近邻与最佳 CVE 近邻相似度非常接近时，将其视为负证据，抑制 CVE 输出。
+
+当前默认参数：
+
+```text
+base_threshold=0.86
+min_votes=1
+vote_weight=0.015
+empty_penalty_margin=0.05
+empty_penalty_floor=0.80
+empty_penalty_ratio=0.50
+```
+
+基于缓存 top-50 检索结果生成：
+
+```text
+data/experiments/test_official_optimized.csv
+```
+
+预测数量分布：
+
+```text
+0 labels: 91313
+1 label : 10169
+2 labels: 1945
+3 labels: 1650
+```
+
+评估：
+
+```text
+all_rows
+rows:        105077
+answer_rate: 0.130990
+exact_match: 0.928129
+precision:   0.666632
+recall:      0.710354
+micro_f1:    0.687799
+macro_f1:    0.523245
+
+labeled=1
+rows:        50240
+answer_rate: 0.247313
+exact_match: 0.876334
+precision:   0.828398
+recall:      0.710354
+micro_f1:    0.764848
+macro_f1:    0.592976
+
+truth_nonempty_cve
+rows:        15769
+answer_rate: 0.744435
+exact_match: 0.649502
+precision:   0.881714
+recall:      0.710354
+micro_f1:    0.786812
+macro_f1:    0.661345
+```
+
+相对原始完整预测，核心提升：
+
+```text
+all_rows micro_f1: 0.259270 -> 0.687799
+labeled=1 micro_f1: 0.561300 -> 0.764848
+all_rows precision: 0.156417 -> 0.666632
+```
+
+代价：
+
+```text
+recall: 0.757105 -> 0.710354
+```
+
+这是可接受的权衡，因为原主要瓶颈是负样本误报。
+
+## 5. 推荐运行命令
+
+先合并训练集：
+
+```bash
+python utils/merge_training_csv.py \
+  --input ./data/train_with_ultimate.csv \
+  --input ./data/train_payload.csv \
+  --output ./data/experiments/train_combined.csv
+```
+
+再构建或复用 combined 索引并预测：
+
+```bash
+python main.py \
+  --train-path ./data/experiments/train_combined.csv \
+  --test-path ./data/test_payload.csv \
+  --test-payload-column payload_decoded \
+  --store-dir ./embeddings/faiss_store_combined \
+  --output-path ./data/experiments/test_official_optimized.csv \
+  --model-path ./models/all-MiniLM-L6-v2 \
+  --reuse-cache
+```
+
+如需关闭空标签近邻抑制用于对照实验：
+
+```bash
+--empty-penalty-margin -1
 ```
 
 ## 6. 后续优化方向
 
-建议按优先级处理：
+优先级建议：
 
-1. 提高 `base_threshold`，观察 precision 与 recall 变化。
-2. 调整 `--min-votes`，要求 CVE 至少被多个近邻支持。
-3. 针对 `labeled=0` 和空 CVE 样本建立负样本过滤器。
-4. 单独统计高误报 CVE，做黑名单或更高阈值策略。
-5. 对不同 CVE 按训练集中出现频次设定动态阈值。
-6. 测试官方训练集、扩展训练集、合并训练集三种索引效果。
-
-建议下一轮实验从以下参数开始：
-
-```bash
---base-threshold 0.87
---min-votes 2
---vote-weight 0.01
-```
+1. 将负证据过滤做成更系统的调参脚本，避免手写实验代码。
+2. 按 CVE 频次或类别设定动态阈值，降低热门 CVE 的误报。
+3. 对高频误报 CVE 做错误分析，检查是否存在训练样本标签污染。
+4. 尝试更强 embedding 模型或领域模型，但需先评估速度和离线可部署性。
+5. 将 FAISS 检索缓存和预测缓存拆开，减少重复 CPU 检索时间。
 
 ## 7. Git 与数据管理
 
-以下内容已加入忽略，避免上传授权数据、模型和本地预测结果：
+以下内容不参与上传：
 
 ```text
 data/datacon2025/
 data/train_payload.csv
 data/test_payload.csv
 data/test_payload_cleaned.csv
+data/experiments/
 models/
 embeddings/
 ans/test_official_labeled.csv
@@ -287,4 +289,4 @@ wp.pdf
 wp_extracted.txt
 ```
 
-本次报告 `PROGRESS_REPORT.md` 按当前请求纳入 Git 提交。
+本报告仅记录进度和实验结果，不包含授权数据正文。

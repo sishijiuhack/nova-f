@@ -166,6 +166,9 @@ def label_test_payloads(
 	search_batch_size: int,
 	min_votes: int,
 	vote_weight: float,
+	empty_penalty_margin: float,
+	empty_penalty_floor: float,
+	empty_penalty_ratio: float,
 	reuse_cache: bool,
 ) -> Path:
 	"""Generate CVE predictions for the provided test dataset."""
@@ -186,6 +189,7 @@ def label_test_payloads(
 	train_labels: List[List[str]] = [
 		preprocess_mod.normalize_cve_labels(labels) for labels in raw_train_labels
 	]
+	train_has_cve = [search_mod.has_cve_label(labels) for labels in train_labels]
 
 	index = faiss.read_index(str(index_path))
 
@@ -264,6 +268,16 @@ def label_test_payloads(
 				max_diff_second=second_gap,
 				max_diff_third=third_gap,
 			)
+			if preds and search_mod.should_suppress_by_empty_neighbors(
+				idxs,
+				sims,
+				train_has_cve,
+				base_threshold=base_threshold,
+				empty_penalty_margin=empty_penalty_margin,
+				empty_penalty_floor=empty_penalty_floor,
+				empty_penalty_ratio=empty_penalty_ratio,
+			):
+				preds = []
 			pred_counts[len(preds)] = pred_counts.get(len(preds), 0) + 1
 			results.append({"id": row_id, "cve_labels": " ".join(preds)})
 
@@ -305,13 +319,16 @@ def parse_args() -> argparse.Namespace:
 	parser.add_argument("--search-batch-size", type=int, default=512, help="FAISS 检索批量大小")
 	parser.add_argument("--top-k", type=int, default=50, help="检索候选数量")
 	parser.add_argument("--max-candidates", type=int, default=5, help="每条样本保留的候选 CVE 数量")
-	parser.add_argument("--base-threshold", type=float, default=0.84, help="基础相似度阈值")
+	parser.add_argument("--base-threshold", type=float, default=0.86, help="基础相似度阈值")
 	parser.add_argument("--high-confidence", type=float, default=0.87, help="第二候选高置信阈值")
 	parser.add_argument("--medium-confidence", type=float, default=0.78, help="第二候选中置信阈值")
 	parser.add_argument("--second-gap", type=float, default=0.15, help="第二候选与第一候选最大差值")
 	parser.add_argument("--third-gap", type=float, default=0.05, help="第三候选与第二候选最大差值")
 	parser.add_argument("--min-votes", type=int, default=1, help="CVE aggregate minimum neighbour votes")
 	parser.add_argument("--vote-weight", type=float, default=0.015, help="CVE aggregate vote bonus")
+	parser.add_argument("--empty-penalty-margin", type=float, default=0.05, help="Suppress prediction when empty-label neighbours are within this similarity gap; set negative to disable")
+	parser.add_argument("--empty-penalty-floor", type=float, default=0.80, help="Minimum similarity for empty-label negative evidence")
+	parser.add_argument("--empty-penalty-ratio", type=float, default=0.50, help="Required empty-neighbour votes relative to CVE-neighbour votes")
 	parser.add_argument("--overwrite-clean", action="store_true", help="强制重新生成清洗数据")
 	parser.add_argument("--overwrite-test-clean", action="store_true", help="强制重新生成测试清洗数据")
 	parser.add_argument("--overwrite-index", action="store_true", help="强制重新构建索引")
@@ -389,6 +406,9 @@ def main() -> None:
 		search_batch_size=args.search_batch_size,
 		min_votes=args.min_votes,
 		vote_weight=args.vote_weight,
+		empty_penalty_margin=args.empty_penalty_margin,
+		empty_penalty_floor=args.empty_penalty_floor,
+		empty_penalty_ratio=args.empty_penalty_ratio,
 		reuse_cache=args.reuse_cache,
 	)
 
