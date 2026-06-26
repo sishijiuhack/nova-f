@@ -9,21 +9,15 @@ HTTP payload 清洗
 -> SentenceTransformer 向量编码
 -> FAISS 近邻检索
 -> CVE 候选聚合
--> 负样本近邻抑制
+-> 空标签近邻负证据抑制
 -> OOF blocklist
--> 可选结构化 rerank
--> 可选规则配置补召回
+-> 可选 structured rerank
+-> 可选结构化规则补召回
 ```
 
 ## 当前状态
 
 项目已经完成主要工程化优化，并在 WSL-Ubuntu 下跑通过全量主流程。
-
-WSL 全量验证命令已成功运行，输出：
-
-```text
-data/experiments/wsl_full_recall_first.csv
-```
 
 全量主流程 rerank+blocklist 阶段评估：
 
@@ -101,21 +95,28 @@ CVE 候选聚合
 
 ## Linux / WSL 环境配置
 
-推荐使用 conda 环境。当前验证环境为：
-
-```text
-WSL-Ubuntu
-Python 3.12.13
-conda env: nova-f
-```
-
-创建环境示例：
+推荐直接使用安装脚本：
 
 ```bash
-conda create -n nova-f python=3.12 -y
-conda activate nova-f
-python -m pip install --upgrade pip
-python -m pip install numpy pandas tqdm faiss-cpu sentence-transformers
+source ./setup_install.sh
+```
+
+脚本会：
+
+```text
+检查 Python 版本
+创建 .venv
+升级 pip/setuptools/wheel
+安装 numpy、pandas、tqdm、faiss-cpu、sentence-transformers
+验证核心依赖可导入
+激活虚拟环境
+```
+
+如果不希望当前 shell 自动激活环境，也可以执行：
+
+```bash
+bash ./setup_install.sh
+source ./.venv/bin/activate
 ```
 
 如果 WSL 访问 HuggingFace 不稳定，建议先在 Windows 下载模型，然后放到：
@@ -161,6 +162,278 @@ payload_decoded
 labeled
 cve_labels
 ```
+
+## 框架
+
+项目整体遵循“数据清洗 -> 向量索引构建 -> 本地相似度检索 -> 自适应标签输出 -> 可选后处理增强”的流水线架构。
+
+### 数据预处理
+
+`src/preprocess.py` 提供 `clean_payload_text`、`preprocess_dataframe`、`normalize_cve_labels` 等函数。
+
+`clean_payload_text` 对 HTTP 报文按统一规则处理：
+
+```text
+去除低区分度请求头
+统一换行符
+删除空行
+标准化连续空白
+保留 method、path、query、body 等高价值内容
+```
+
+训练集、测试集都通过 `main.py` 的入口函数生成带 `payload_clean` 列的 CSV：
+
+```text
+preprocess_training_data
+preprocess_test_data
+```
+
+这样训练和测试使用同一套清洗规则，避免输入分布不一致。
+
+`normalize_cve_labels` 负责解析 CVE 标签，兼容空值、字符串、Python list 字符串、JSON list 字符串、空格分隔标签。最终统一为去重、升序、大写的 `CVE-XXXX` 标签列表。
+
+### 向量化与索引
+
+默认使用本地 SentenceTransformer：
+
+```text
+models/all-MiniLM-L6-v2
+```
+
+也可以通过参数替换：
+
+```bash
+--model-path
+--device
+--train-text-prefix
+--test-text-prefix
+```
+
+`src/build_faiss.py` 负责读取清洗后的训练集，批量编码 `payload_clean`，并生成：
+
+```text
+train_embeddings.npy
+faiss.index
+meta.json
+```
+
+索引使用 FAISS `IndexFlatIP`。向量会做 L2 归一化，因此内积相似度等价于余弦相似度。
+
+`meta.json` 记录训练样本 ID、归一化标签列表、模型名称、向量文件名、索引文件名、时间戳等信息，供后续检索使用。`main.py` 的 `build_vector_store` 封装了这一流程。
+
+### 离线检索与预测
+
+`src/search_faiss.py` 负责检索和预测核心逻辑。
+
+测试集向量会缓存到：
+
+```text
+test_embeddings.npy
+test_cache_meta.json
+```
+
+缓存会校验测试集 ID、embedding 模型、`test_text_prefix`。匹配时直接复用，避免重复编码。
+
+检索阶段调用：
+
+```python
+faiss.Index.search
+```
+
+可配置参数：
+
+```bash
+--top-k
+--max-candidates
+--search-batch-size
+```
+
+### CVE 候选聚合
+
+原始版本接近“取最相似近邻的第一个 CVE”，容易受单个噪声近邻影响。当前改为对 top-k 近邻中的 CVE 证据做聚合：
+
+```text
+score = best_similarity + min(votes - 1, 8) * vote_weight
+```
+
+默认：
+
+```text
+min_votes=1
+vote_weight=0.015
+```
+
+这样既保留长尾 CVE 的单近邻召回能力，又能利用多个近邻支持同一 CVE 的一致性。
+
+### 自适应标签输出
+
+`adaptive_predict` 根据多层阈值决定最终输出 0 到 3 个 CVE：
+
+```text
+base_threshold
+high_confidence
+medium_confidence
+second_gap
+third_gap
+```
+
+逻辑上先判断 top-1 是否超过基础阈值，再根据第二、第三候选的置信度和分差决定是否补充多标签。
+
+### 空标签近邻负证据
+
+官方训练数据中存在大量空标签或非 CVE 样本。当前系统把这些样本作为负证据。
+
+如果一个测试 payload 的空标签近邻与 CVE 近邻非常接近，说明该请求可能是“相似但不应输出 CVE”的流量，因此抑制输出。
+
+关键参数：
+
+```text
+empty_penalty_margin=0.05
+empty_penalty_floor=0.80
+empty_penalty_ratio=0.50
+```
+
+这一步显著降低了初始版本的误报。
+
+### OOF blocklist
+
+`utils/learn_blocklist_from_folds.py` 使用训练集 out-of-fold 预测找系统性误报 CVE，而不是从测试集真值直接写规则。
+
+当前使用的 blocklist：
+
+```text
+data/experiments/fold_blocklist_fp20_p002_mf2.txt
+```
+
+运行时通过参数启用：
+
+```bash
+--prediction-blocklist ./data/experiments/fold_blocklist_fp20_p002_mf2.txt
+```
+
+### Structured rerank
+
+`src/structured_features.py` 抽取 HTTP 结构化特征：
+
+```text
+method
+path
+path token
+query key
+body key
+payload token
+```
+
+`main.py` 支持可选 structured rerank：
+
+```bash
+--structured-rerank-alpha 0.03
+--train-feature-path ./data/experiments/train_combined_cleaned.csv
+```
+
+重排公式：
+
+```text
+score = semantic_score + alpha * feature_bonus
+```
+
+`feature_bonus` 包含 method match、path exact match、path token Jaccard、query key Jaccard、body key Jaccard、payload token Jaccard。
+
+该分支提高 recall 和 Macro-F1，但会牺牲一部分 precision，因此作为 recall-first 模式使用。
+
+### 结构化规则配置
+
+`utils/structured_signature_rules.py` 可以从训练数据中挖掘高精度结构化规则。规则类型包括：
+
+```text
+path
+query_keys
+body_keys
+query_key_value
+body_key_value
+token
+```
+
+规则可以导出为可审计 JSON：
+
+```bash
+python utils/export_rule_config.py
+```
+
+配置字段包括：
+
+```text
+rule_id
+enabled
+rule_type
+signature
+target_cve
+support
+precision
+source
+risk_level
+```
+
+应用规则：
+
+```bash
+python utils/apply_rule_config.py
+```
+
+当前推荐只对空预测补召回：
+
+```bash
+--only-empty
+--max-additions 1
+```
+
+避免在已有预测上盲目追加标签导致 FP 扩散。
+
+### 主流程集成
+
+`main.py` 串联以下步骤：
+
+```text
+检查输入文件
+清洗训练集
+清洗测试集
+构建或复用 FAISS 索引
+编码或复用测试向量
+FAISS top-k 检索
+CVE 候选聚合
+structured rerank（可选）
+空标签近邻抑制
+prediction blocklist（可选）
+写出 id,cve_labels CSV
+输出候选数量、相似度统计、预测数量分布
+```
+
+常用控制参数：
+
+```bash
+--overwrite-clean
+--overwrite-test-clean
+--overwrite-index
+--reuse-cache
+--top-k
+--base-threshold
+--prediction-blocklist
+--structured-rerank-alpha
+```
+
+### 依赖
+
+当前代码实际依赖精简为：
+
+```text
+numpy
+pandas
+tqdm
+faiss-cpu
+sentence-transformers
+```
+
+不再依赖 LangChain 或 Chroma。
 
 ## 启动项目
 
@@ -307,116 +580,6 @@ python utils/export_data_gap_report.py \
   --output-md ./data/experiments/cve_data_gap_no_train_support.md
 ```
 
-## 工程架构
-
-```text
-main.py
-  一站式清洗、建库、检索、预测入口
-
-src/preprocess.py
-  HTTP payload 清洗、CVE 标签归一化
-
-src/build_faiss.py
-  SentenceTransformer 编码与 FAISS 索引构建
-
-src/search_faiss.py
-  FAISS 检索、CVE 候选聚合、空标签负证据抑制、blocklist、rerank
-
-src/structured_features.py
-  method/path/query/body/token 结构化特征抽取
-
-utils/convert_datacon_jsonl.py
-  官方 json.gz 转 CSV
-
-utils/merge_training_csv.py
-  合并训练集
-
-utils/cache_search_results.py
-  缓存 FAISS top-k 结果
-
-utils/tune_retrieval_params.py
-  基于缓存结果调参
-
-utils/learn_blocklist_from_folds.py
-  训练集 OOF blocklist 学习
-
-utils/structured_signature_rules.py
-  结构化规则挖掘、OOF 验证、应用
-
-utils/export_rule_config.py / utils/apply_rule_config.py
-  规则配置化
-
-utils/evaluate_predictions.py / utils/evaluate_per_label.py
-  整体和 per-CVE 评估
-
-utils/diagnose_long_tail.py / utils/export_data_gap_report.py
-  长尾诊断和缺样本 CVE 导出
-```
-
-## 核心算法
-
-### CVE 候选聚合
-
-对 top-k 近邻中的每个 CVE 聚合证据：
-
-```text
-score = best_similarity + min(votes - 1, 8) * vote_weight
-```
-
-默认：
-
-```text
-vote_weight=0.015
-min_votes=1
-```
-
-### 空标签近邻负证据
-
-如果空标签近邻与 CVE 近邻非常接近，说明该请求可能是相似但不应标 CVE 的流量，因此抑制输出。
-
-默认：
-
-```text
-empty_penalty_margin=0.05
-empty_penalty_floor=0.80
-empty_penalty_ratio=0.50
-```
-
-### OOF blocklist
-
-用训练集 out-of-fold 预测找系统性误报 CVE，而不是从测试集真值写规则。
-
-当前使用：
-
-```text
-fold_blocklist_fp20_p002_mf2.txt
-```
-
-### Structured rerank
-
-在 embedding 相似度基础上加入 HTTP 结构一致性：
-
-```text
-score = semantic_score + alpha * feature_bonus
-```
-
-`feature_bonus` 包含：
-
-```text
-method match
-path exact match
-path token Jaccard
-query key Jaccard
-body key Jaccard
-payload token Jaccard
-```
-
-当前推荐：
-
-```text
-alpha=0.03
-```
-
 ## 当前限制
 
 仍有一批 CVE 在训练集中没有支持样本，例如：
@@ -441,5 +604,5 @@ CVE-2021-43163
 完整优化过程、实验分支和技术分析见：
 
 ```text
-FINAL_TECHNICAL_REPORT.md
+EXPERIMENT.md
 ```
