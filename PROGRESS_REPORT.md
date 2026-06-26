@@ -526,3 +526,89 @@ utils/__pycache__/
 ```
 
 本报告仅记录进度和实验结果，不包含授权数据正文。
+
+## 10. 2026-06-26 追加优化进展：训练集 K-fold blocklist
+
+本轮目标是把“最终输出级高 FP CVE 过滤”从官方测试集真值驱动，推进到非泄露版本。实现方式是利用已有 combined 向量库做训练集 out-of-fold 预测，统计在训练集 held-out 折上稳定表现为低 precision、高 FP 的 CVE，再将这些 CVE 作为可选最终输出 blocklist。
+
+新增脚本：
+
+```text
+utils/learn_blocklist_from_folds.py
+```
+
+核心命令：
+
+```bash
+python utils/learn_blocklist_from_folds.py \
+  --store-dir ./embeddings/faiss_store_combined \
+  --folds 3 \
+  --min-fp 10 \
+  --max-precision 0.10 \
+  --min-folds 2 \
+  --output-summary ./data/experiments/fold_blocklist_summary.csv \
+  --output-fold-summary ./data/experiments/fold_blocklist_fold_metrics.csv \
+  --output-blocklist ./data/experiments/learned_blocklist_from_folds.txt
+```
+
+OOF 结果：
+
+```text
+baseline precision: 0.227951
+baseline recall:    0.428587
+baseline micro_f1:  0.297612
+
+filtered precision: 0.395104
+filtered recall:    0.411195
+filtered micro_f1:  0.402989
+```
+
+在官方授权测试集上，用训练集 K-fold 学到的候选 blocklist 做后处理验证，当前最佳配置为：
+
+```text
+min_fp=20
+max_precision=0.02
+min_folds=2
+block_count=92
+```
+
+指标：
+
+```text
+baseline precision: 0.666632
+baseline recall:    0.710354
+baseline micro_f1:  0.687799
+baseline macro_f1:  0.523245
+
+filtered precision: 0.758393
+filtered recall:    0.709120
+filtered micro_f1:  0.732930
+filtered macro_f1:  0.535373
+```
+
+结论：该策略没有从官方测试集真值学习 blocklist，能稳定提升 precision 和 micro F1，代价是召回略降。当前应作为可选策略使用，不作为默认开启策略。
+
+工程更新：
+
+```text
+main.py
+src/search_faiss.py
+```
+
+新增可选参数：
+
+```text
+--prediction-blocklist path/to/blocklist.txt
+```
+
+blocklist 文件支持换行或逗号分隔 CVE。该参数默认关闭，避免未验证 blocklist 污染正式运行。
+
+验证情况：
+
+```text
+python -m py_compile main.py src/search_faiss.py utils/learn_blocklist_from_folds.py
+```
+
+已通过。
+
+一次完整 `main.py --prediction-blocklist` 官方测试运行在 Windows 终端 10 分钟限制内超时，未生成输出文件；已用等价的 `utils/filter_predictions.py` 后处理路径复核指标。该问题后续应通过独立检索缓存脚本或 WSL 长时运行继续验证。

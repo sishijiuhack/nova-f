@@ -878,3 +878,93 @@ recall:         0.707942 -> 0.704698
 - 半分验证提升稳定，说明高 FP 低 precision CVE 的误报模式较稳定。
 - 但该实验仍使用官方测试集内部真值，仍属于研究分析。
 - 下一步应做真正无泄漏版本：从训练集 holdout/K-fold 学习 blocklist 或 penalty，再应用到官方测试集。
+
+## 14. 训练集 K-fold blocklist 实验与工程化
+
+前面两组 filter 实验说明：少数 CVE 会系统性制造大量 false positive，最终输出级过滤有明显收益。但直接用官方测试集真值学习 blocklist 属于 oracle 分析，不能作为严格方案。为解决这个问题，本轮实现了训练集 out-of-fold 学习流程。
+
+新增脚本：
+
+```text
+utils/learn_blocklist_from_folds.py
+```
+
+设计理由：
+
+- 使用已有 `embeddings/faiss_store_combined/train_embeddings.npy` 和 `meta.json`，避免重新编码 72938 条训练样本。
+- 将训练集随机切成 3 折，每次用 K-1 折建临时 FAISS，预测 held-out 折。
+- 在 held-out 预测中统计每个 CVE 的 `tp/fp/fn/precision/recall/f1`。
+- 只保留跨至少 2 折稳定满足 `fp >= min_fp` 且 `precision <= max_precision` 的 CVE。
+- blocklist 来源完全来自训练集 OOF 表现，不读取官方测试集真值。
+
+初始配置：
+
+```bash
+python utils/learn_blocklist_from_folds.py \
+  --store-dir ./embeddings/faiss_store_combined \
+  --folds 3 \
+  --min-fp 10 \
+  --max-precision 0.10 \
+  --min-folds 2 \
+  --output-summary ./data/experiments/fold_blocklist_summary.csv \
+  --output-fold-summary ./data/experiments/fold_blocklist_fold_metrics.csv \
+  --output-blocklist ./data/experiments/learned_blocklist_from_folds.txt
+```
+
+OOF 指标：
+
+```text
+baseline precision: 0.227951
+baseline recall:    0.428587
+baseline micro_f1:  0.297612
+baseline macro_f1:  0.062092
+
+filtered precision: 0.395104
+filtered recall:    0.411195
+filtered micro_f1:  0.402989
+filtered macro_f1:  0.061649
+```
+
+当前最佳非泄露候选：
+
+```text
+min_fp=20
+max_precision=0.02
+min_folds=2
+block_count=92
+```
+
+官方授权测试集研究评估：
+
+```text
+baseline precision: 0.666632
+baseline recall:    0.710354
+baseline micro_f1:  0.687799
+baseline macro_f1:  0.523245
+
+filtered precision: 0.758393
+filtered recall:    0.709120
+filtered micro_f1:  0.732930
+filtered macro_f1:  0.535373
+```
+
+与 oracle filter 的关系：
+
+- oracle filter：micro F1 `0.760703`，但使用官方测试真值学习 blocklist，只能作为上界。
+- OOF blocklist：micro F1 `0.732930`，blocklist 来源不依赖官方测试真值，更接近可提交策略。
+
+代码优化：
+
+- `main.py` 新增 `--prediction-blocklist`，主流水线可直接加载换行或逗号分隔 CVE 列表。
+- `src/search_faiss.py` 同步支持 `--prediction-blocklist`，直接检索入口与主入口行为一致。
+- 该参数默认关闭，避免把未经验证的 blocklist 固化为默认行为。
+
+验证：
+
+```text
+python -m py_compile main.py src/search_faiss.py utils/learn_blocklist_from_folds.py
+```
+
+已通过。
+
+完整 `main.py --prediction-blocklist` 官方集长跑在 Windows 10 分钟命令限制内超时，未生成输出；已用等价 `utils/filter_predictions.py` 路径复核指标。后续应补 `utils/cache_search_results.py` 或在 WSL 长时窗口中完成主流程端到端复核。

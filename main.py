@@ -22,6 +22,22 @@ def configure_logging(verbose: bool) -> None:
 	logging.basicConfig(level=level, format="%(asctime)s | %(levelname)s | %(message)s")
 
 
+def load_prediction_blocklist(path: Path | None) -> set[str]:
+	"""Load CVE labels that should be removed from final predictions."""
+	if path is None:
+		return set()
+	if not path.exists():
+		raise FileNotFoundError(f"prediction blocklist not found: {path}")
+
+	labels: set[str] = set()
+	for raw_line in path.read_text(encoding="utf-8").splitlines():
+		for token in raw_line.replace(",", " ").split():
+			label = token.strip().upper()
+			if label.startswith("CVE-"):
+				labels.add(label)
+	return labels
+
+
 def preprocess_training_data(
 	train_path: Path,
 	output_path: Path,
@@ -173,6 +189,7 @@ def label_test_payloads(
 	empty_penalty_floor: float,
 	empty_penalty_ratio: float,
 	test_text_prefix: str | None,
+	prediction_blocklist: set[str] | None,
 	reuse_cache: bool,
 ) -> Path:
 	"""Generate CVE predictions for the provided test dataset."""
@@ -243,6 +260,8 @@ def label_test_payloads(
 	filtered_out = 0
 	score_stats: List[float] = []
 	pred_counts: Dict[int, int] = {}
+	blocked_prediction_count = 0
+	active_blocklist = prediction_blocklist or set()
 
 	for start in range(0, len(test_vectors), search_batch_size):
 		end = min(start + search_batch_size, len(test_vectors))
@@ -288,12 +307,23 @@ def label_test_payloads(
 				empty_penalty_ratio=empty_penalty_ratio,
 			):
 				preds = []
+			if preds and active_blocklist:
+				before_count = len(preds)
+				preds = [label for label in preds if label not in active_blocklist]
+				blocked_prediction_count += before_count - len(preds)
 			pred_counts[len(preds)] = pred_counts.get(len(preds), 0) + 1
 			results.append({"id": row_id, "cve_labels": " ".join(preds)})
 
 	output_path.parent.mkdir(parents=True, exist_ok=True)
 	pd.DataFrame(results).to_csv(output_path, index=False)
 	logging.info("预测结果已保存: %s", output_path)
+
+	if active_blocklist:
+		logging.info(
+			"Prediction blocklist active: %d labels, %d predicted labels removed",
+			len(active_blocklist),
+			blocked_prediction_count,
+		)
 
 	if score_stats:
 		scores = np.asarray(score_stats)
@@ -341,6 +371,7 @@ def parse_args() -> argparse.Namespace:
 	parser.add_argument("--empty-penalty-margin", type=float, default=0.05, help="Suppress prediction when empty-label neighbours are within this similarity gap; set negative to disable")
 	parser.add_argument("--empty-penalty-floor", type=float, default=0.80, help="Minimum similarity for empty-label negative evidence")
 	parser.add_argument("--empty-penalty-ratio", type=float, default=0.50, help="Required empty-neighbour votes relative to CVE-neighbour votes")
+	parser.add_argument("--prediction-blocklist", default=None, help="Optional newline/comma separated CVE labels to remove from final predictions")
 	parser.add_argument("--overwrite-clean", action="store_true", help="强制重新生成清洗数据")
 	parser.add_argument("--overwrite-test-clean", action="store_true", help="强制重新生成测试清洗数据")
 	parser.add_argument("--overwrite-index", action="store_true", help="强制重新构建索引")
@@ -390,6 +421,9 @@ def main() -> None:
 
 	store_dir = Path(args.store_dir)
 	model_for_training = args.model_path or "sentence-transformers/all-MiniLM-L6-v2"
+	prediction_blocklist = load_prediction_blocklist(Path(args.prediction_blocklist) if args.prediction_blocklist else None)
+	if prediction_blocklist:
+		logging.info("Loaded prediction blocklist with %d CVE labels", len(prediction_blocklist))
 	build_vector_store(
 		clean_path,
 		store_dir,
@@ -423,6 +457,7 @@ def main() -> None:
 		empty_penalty_floor=args.empty_penalty_floor,
 		empty_penalty_ratio=args.empty_penalty_ratio,
 		test_text_prefix=args.test_text_prefix,
+		prediction_blocklist=prediction_blocklist,
 		reuse_cache=args.reuse_cache,
 	)
 

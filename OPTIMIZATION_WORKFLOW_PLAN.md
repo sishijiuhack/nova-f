@@ -281,3 +281,85 @@ utils/filter_predictions.py
 ```
 
 本文件用于后续继续实验时快速恢复上下文。
+
+## 7. 2026-06-26 执行记录：Step 1 与 Step 2 已推进
+
+### Step 1：训练集 K-fold 学习 blocklist
+
+已实现：
+
+```text
+utils/learn_blocklist_from_folds.py
+```
+
+使用已有 combined 向量库做 3-fold out-of-fold 预测，不重新编码训练集。每折用 K-1 折建临时 FAISS，对 held-out 折预测，再统计每个 CVE 的 `tp/fp/fn/precision/recall/f1`。最终只保留跨至少 2 折稳定低 precision、高 FP 的 CVE。
+
+初始 OOF 结果：
+
+```text
+baseline micro_f1: 0.297612
+filtered micro_f1: 0.402989
+```
+
+阈值复用扫描后，当前最佳非泄露候选：
+
+```text
+min_fp=20
+max_precision=0.02
+min_folds=2
+block_count=92
+```
+
+官方授权测试集研究评估：
+
+```text
+baseline precision: 0.666632
+baseline recall:    0.710354
+baseline micro_f1:  0.687799
+baseline macro_f1:  0.523245
+
+filtered precision: 0.758393
+filtered recall:    0.709120
+filtered micro_f1:  0.732930
+filtered macro_f1:  0.535373
+```
+
+结论：该方向成立。收益主要来自 precision 提升，recall 仅轻微下降。与 oracle filter 的 `0.760703` micro F1 仍有差距，但 OOF blocklist 不依赖官方测试真值，更适合作为候选提交策略。
+
+### Step 2：主流程可选 blocklist
+
+已实现：
+
+```text
+main.py --prediction-blocklist path/to/blocklist.txt
+src/search_faiss.py --prediction-blocklist path/to/blocklist.txt
+```
+
+说明：
+
+- 默认关闭。
+- blocklist 文件支持换行或逗号分隔 CVE。
+- 主流程会统计加载标签数和移除的预测标签数。
+- blocklist 来源必须在报告中注明，防止泄露或过拟合。
+
+验证：
+
+```text
+python -m py_compile main.py src/search_faiss.py utils/learn_blocklist_from_folds.py
+```
+
+已通过。
+
+遗留问题：
+
+- `main.py --prediction-blocklist` 官方测试端到端运行在 Windows 10 分钟命令限制内超时，未生成输出；已用等价 `utils/filter_predictions.py` 后处理验证指标。
+- 下一步应优先补 `utils/cache_search_results.py`，把向量检索结果持久化，让后续 blocklist、rerank、per-CVE threshold 实验不再重复跑 FAISS 检索。
+
+### 下个对话框继续点
+
+如果上下文被压缩或切换，请从这里继续：
+
+1. 不要重新读取授权数据正文到 Git，不提交 `data/experiments/`、`data/datacon2025/`、`models/`、`embeddings/`。
+2. 当前最佳非泄露候选为 OOF blocklist：`min_fp=20,max_precision=0.02,min_folds=2`，官方研究指标 `micro_f1=0.732930`。
+3. 优先做 `utils/cache_search_results.py`，随后做高 FN CVE 专项分析：`CVE-2021-20016`、`CVE-2017-7921`、`CVE-2021-38649`、`CVE-2023-27372`、`CVE-2018-13379`。
+4. 结构化特征 rerank 作为下一条实验线，先写实验脚本，不直接改主流程默认策略。

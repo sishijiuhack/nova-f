@@ -24,6 +24,22 @@ def configure_logging(verbose: bool) -> None:
     logging.basicConfig(level=level, format="%(asctime)s | %(levelname)s | %(message)s")
 
 
+def load_prediction_blocklist(path: Path | None) -> set[str]:
+    """Load CVE labels that should be removed from final predictions."""
+    if path is None:
+        return set()
+    if not path.exists():
+        raise FileNotFoundError(f"prediction blocklist not found: {path}")
+
+    labels: set[str] = set()
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        for token in raw_line.replace(",", " ").split():
+            label = token.strip().upper()
+            if label.startswith("CVE-"):
+                labels.add(label)
+    return labels
+
+
 def load_sentence_encoder(model_path: str, device: str | None = None) -> SentenceTransformer:
     """加载本地 SentenceTransformer 模型。"""
     logging.info("加载本地嵌入模型: %s", model_path)
@@ -261,6 +277,7 @@ def main() -> None:
     parser.add_argument("--empty-penalty-margin", type=float, default=0.05, help="Suppress prediction when empty-label neighbours are within this similarity gap; set negative to disable")
     parser.add_argument("--empty-penalty-floor", type=float, default=0.80, help="Minimum similarity for empty-label negative evidence")
     parser.add_argument("--empty-penalty-ratio", type=float, default=0.50, help="Required empty-neighbour votes relative to CVE-neighbour votes")
+    parser.add_argument("--prediction-blocklist", default=None, help="Optional newline/comma separated CVE labels to remove from final predictions")
     parser.add_argument("--search-batch-size", type=int, default=512, help="FAISS 检索时的批量大小")
     parser.add_argument("--verbose", action="store_true", help="开启详细日志")
     args = parser.parse_args()
@@ -336,6 +353,8 @@ def main() -> None:
     filtered_out = 0
     score_stats: List[float] = []
     pred_counts: Dict[int, int] = {}
+    prediction_blocklist = load_prediction_blocklist(Path(args.prediction_blocklist) if args.prediction_blocklist else None)
+    blocked_prediction_count = 0
 
     for start in tqdm(range(0, len(test_vectors), args.search_batch_size), desc="执行向量检索"):
         end = min(start + args.search_batch_size, len(test_vectors))
@@ -380,8 +399,15 @@ def main() -> None:
                 empty_penalty_ratio=args.empty_penalty_ratio,
             ):
                 preds = []
+            if preds and prediction_blocklist:
+                before_count = len(preds)
+                preds = [label for label in preds if label not in prediction_blocklist]
+                blocked_prediction_count += before_count - len(preds)
             pred_counts[len(preds)] = pred_counts.get(len(preds), 0) + 1
             results.append({"id": row_id, "cve_labels": " ".join(preds)})
+
+    if prediction_blocklist:
+        print(f"Prediction blocklist: {len(prediction_blocklist)} labels, removed {blocked_prediction_count} predicted labels")
 
     output_path = Path(args.output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)

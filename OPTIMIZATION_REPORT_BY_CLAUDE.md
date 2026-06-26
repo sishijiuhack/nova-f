@@ -736,6 +736,122 @@ config = yaml.safe_load(open('configs/default.yaml'))
 
 **报告结束**
 
+---
+
+## Codex 实验记录：训练集 K-fold blocklist 验证
+
+时间：2026-06-26
+
+对应 Claude 报告建议：
+
+- 路径 B：动态阈值 / per-CVE 后处理。
+- 路径 E：工程优化与实验效率。
+- “手写 CVE 黑名单”风险提示：本实验避免手写，改为训练集 OOF 统计学习。
+
+### 实验动机
+
+前序 oracle filter 显示最终输出级过滤能把官方测试集 micro F1 从 `0.687799` 提升到 `0.760703`，但该 blocklist 来自官方测试真值，不能作为严格策略。为了验证 Claude 报告中“高 FP CVE 后处理”的方向是否能非泄露落地，本轮改为从训练集 out-of-fold 预测中学习 blocklist。
+
+### 实现
+
+新增脚本：
+
+```text
+utils/learn_blocklist_from_folds.py
+```
+
+流程：
+
+1. 读取 `embeddings/faiss_store_combined/meta.json` 和 `train_embeddings.npy`。
+2. 随机划分 3-fold。
+3. 每折用 K-1 折向量建临时 FAISS，对 held-out 折预测。
+4. 统计每个 CVE 在 OOF 预测中的 `tp/fp/fn/precision/recall/f1`。
+5. 选择跨至少 2 折稳定满足低 precision、高 FP 的 CVE。
+
+初始命令：
+
+```bash
+python utils/learn_blocklist_from_folds.py \
+  --store-dir ./embeddings/faiss_store_combined \
+  --folds 3 \
+  --min-fp 10 \
+  --max-precision 0.10 \
+  --min-folds 2 \
+  --output-summary ./data/experiments/fold_blocklist_summary.csv \
+  --output-fold-summary ./data/experiments/fold_blocklist_fold_metrics.csv \
+  --output-blocklist ./data/experiments/learned_blocklist_from_folds.txt
+```
+
+OOF 指标：
+
+```text
+baseline precision: 0.227951
+baseline recall:    0.428587
+baseline micro_f1:  0.297612
+baseline macro_f1:  0.062092
+
+filtered precision: 0.395104
+filtered recall:    0.411195
+filtered micro_f1:  0.402989
+filtered macro_f1:  0.061649
+```
+
+### 阈值复用扫描
+
+初始 `max_precision=0.10` 的 blocklist 偏大，召回损失风险高。因此复用 OOF summary 做阈值扫描。当前最佳配置：
+
+```text
+min_fp=20
+max_precision=0.02
+min_folds=2
+block_count=92
+```
+
+官方授权测试集研究评估：
+
+```text
+baseline precision: 0.666632
+baseline recall:    0.710354
+baseline micro_f1:  0.687799
+baseline macro_f1:  0.523245
+
+filtered precision: 0.758393
+filtered recall:    0.709120
+filtered micro_f1:  0.732930
+filtered macro_f1:  0.535373
+```
+
+### 工程化更新
+
+新增主流程参数：
+
+```text
+--prediction-blocklist path/to/blocklist.txt
+```
+
+涉及文件：
+
+```text
+main.py
+src/search_faiss.py
+```
+
+参数默认关闭。blocklist 文件支持换行或逗号分隔 CVE。该设计保留可复现能力，但不把尚需进一步验证的策略写死进默认流水线。
+
+验证：
+
+```text
+python -m py_compile main.py src/search_faiss.py utils/learn_blocklist_from_folds.py
+```
+
+已通过。
+
+一次完整 `main.py --prediction-blocklist` 官方测试运行在 Windows 10 分钟命令限制内超时，未生成输出；已用等价的 `utils/filter_predictions.py` 后处理路径复核指标。
+
+### 对 Claude 建议的判断
+
+结论：Claude 关于“当前瓶颈从 recall 转向 precision，需要更细粒度后处理”的判断是对的，但直接手写或基于官方测试真值生成 CVE blocklist 风险高。训练集 OOF blocklist 是更严格的折中方案，已把 micro F1 从 `0.687799` 提升到 `0.732930`。下一步不应继续盲目扩大 blocklist，而应补检索缓存、分析高 FN CVE，并尝试结构化特征 rerank。
+
 如需进一步讨论具体实现细节或代码示例，请随时沟通。
 
 ---
