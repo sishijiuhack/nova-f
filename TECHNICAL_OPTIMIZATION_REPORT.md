@@ -1107,3 +1107,148 @@ spip-27372:      micro_f1 0.738010
 - 但这些规则来自官方授权测试集错误分析，严格泛化性仍需训练集 holdout 或额外数据验证。
 
 工程上，当前最合理的状态是保留为独立后处理工具，而不是写入默认主流程。下一步如果要产品化，应将规则抽为配置文件，并在训练集 OOF 或新增验证集上给出每条规则的 precision/recall 证据。
+
+## 16. 规则泛化验证与自动路径规则
+
+### 16.1 为什么要做这一步
+
+`signature rescue` 把 micro F1 提升到 `0.763359`，但它来自官方授权测试集错误分析。技术上这些路径签名合理，但如果不做额外验证，很容易被质疑为“针对测试集写规则”。因此本轮目标不是继续追分，而是区分：
+
+- 哪些规则在训练数据中也有证据，具备真实场景可辩护性。
+- 哪些规则只在当前官方测试分布上有效，适合作为实验上界。
+
+### 16.2 手写规则训练集验证
+
+新增：
+
+```text
+utils/validate_signature_rules.py
+```
+
+验证数据：
+
+```text
+data/train_with_ultimate_cleaned.csv
+data/experiments/train_payload_cleaned.csv
+```
+
+结果：
+
+```text
+wsman-38649:
+tp=342
+fp=0
+fn=0
+precision=1.000000
+recall=1.000000
+5-fold valid precision=1.000000
+5-fold valid recall=1.000000
+
+fortinet-13379:
+tp=3
+fp=1
+fn=102
+precision=0.750000
+recall=0.028571
+
+spip-27372:
+tp=2
+fp=4
+fn=0
+precision=0.333333
+recall=1.000000
+
+hikvision-7921:
+tp=0
+fp=0
+fn=1
+
+sonicwall-20016:
+support=0
+```
+
+结论：
+
+- `wsman-38649` 是强泛化证据规则。它对应的错误不是模型语义问题，而是多标签输出策略漏第 4 个标签。
+- `fortinet-13379`、`spip-27372`、`hikvision-7921`、`sonicwall-20016` 在训练集证据不足，不能直接声称真实泛化。
+
+仅启用 `wsman-38649` 后：
+
+```text
+precision: 0.759890
+recall:    0.714950
+micro_f1:  0.736736
+macro_f1:  0.536132
+```
+
+### 16.3 自动路径签名挖掘
+
+新增：
+
+```text
+utils/mine_path_signature_rules.py
+utils/apply_mined_path_rules.py
+```
+
+设计思路：
+
+- 从训练集提取 `method + normalized path` 签名。
+- 统计每个签名对应 CVE 的 precision/support。
+- 只保留高 precision、高 support 的规则。
+- 应用阶段先限制为 `only-empty`，避免对已有高置信预测做大规模覆盖。
+
+失败实验：
+
+```text
+min_precision=0.99
+min_support=20
+match_level=all
+only_empty=true
+
+precision: 0.541217
+recall:    0.731655
+micro_f1:  0.622190
+```
+
+原因：宽泛路径前缀在训练集中看似高精度，但迁移到测试集会命中大量不同语义流量，导致 FP 激增。
+
+修正实验：
+
+```text
+min_precision=1.0
+min_support=50
+match_level=exact
+only_empty=true
+
+loaded_rules=96
+changed_rows=317
+precision: 0.758251
+recall:    0.722462
+micro_f1:  0.739924
+macro_f1:  0.536005
+```
+
+与 `wsman-38649` 组合：
+
+```text
+precision: 0.759722
+recall:    0.728292
+micro_f1:  0.743675
+macro_f1:  0.536764
+```
+
+### 16.4 当前判断
+
+当前可以把规则策略分成两档：
+
+```text
+可泛化证据较强:
+- OOF blocklist: micro_f1 0.732930
+- OOF blocklist + wsman-38649: micro_f1 0.736736
+- OOF blocklist + wsman-38649 + exact mined path rules: micro_f1 0.743675
+
+实验提分强但泛化证据弱:
+- OOF blocklist + hand-written signature rescue: micro_f1 0.763359
+```
+
+这说明真实场景优化不能只看最高分。下一步应优先把 exact path rules 做成可配置规则文件，并在 OOF 中验证每条规则，而不是把官方测试错误分析得到的规则直接写死。

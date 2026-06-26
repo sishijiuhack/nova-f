@@ -435,3 +435,51 @@ spip-27372:      micro_f1 0.738010
 - 这些规则来自官方授权测试集错误分析，当前只能定义为研究性后处理实验。
 - 下一步必须做泛化验证：训练集 OOF 规则评估，或从训练数据自动挖掘高置信路径到 CVE 的映射。
 - 不要把签名规则默认并入 `main.py`，除非已有独立验证依据。
+
+## 9. 2026-06-26 执行记录：规则泛化验证
+
+已实现：
+
+```text
+utils/validate_signature_rules.py
+utils/mine_path_signature_rules.py
+utils/apply_mined_path_rules.py
+```
+
+手写签名规则在训练集上的验证结果：
+
+```text
+wsman-38649: precision=1.0 recall=1.0 support=342, 5-fold valid precision=1.0
+fortinet-13379: precision=0.75 recall=0.028571
+spip-27372: precision=0.333333 recall=1.0
+hikvision-7921: no hit, support=1
+sonicwall-20016: support=0
+```
+
+结论：
+
+- `wsman-38649` 可归入泛化证据较强规则。
+- 其他四条仍是官方测试错误分析规则，不能直接声称适合真实场景。
+
+自动挖掘路径规则结果：
+
+```text
+wide prefix rules:
+micro_f1=0.622190
+结论：失败，FP 过多。
+
+exact path rules, min_precision=1.0, min_support=50, only_empty:
+micro_f1=0.739924
+
+wsman-38649 + exact path rules:
+micro_f1=0.743675
+precision=0.759722
+recall=0.728292
+macro_f1=0.536764
+```
+
+下一步优先级：
+
+1. 把 mined rules 输出为配置文件格式，加入可审计字段：signature、label、support、precision、source。
+2. 做 OOF 级别的 mined-rule 验证，不能只用全训练集挖规则再看官方测试。
+3. 继续研究高 FN 中训练集无证据但官方测试收益大的规则，判断是否需要外部公开样本补充。

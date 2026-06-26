@@ -960,6 +960,121 @@ spip-27372:      micro_f1 0.738010
 
 Claude 关于“结构化特征潜力大”的判断成立。固定路径/协议签名能弥补 embedding 近邻被空标签压制的问题。当前规则后处理已经把 micro F1 推到 `0.763359`，但由于规则来自官方授权测试错误分析，仍需训练集 OOF 或额外验证集证明泛化，暂不应默认写入主流程。
 
+---
+
+## Codex 实验记录：规则泛化验证与自动路径规则
+
+时间：2026-06-26
+
+对应 Claude 报告建议：
+
+- A1 结构化特征：继续验证路径签名是否能泛化。
+- D1 伪标签/规则增强风险：本轮证明宽泛规则会明显过拟合。
+
+### 手写规则训练集验证
+
+新增：
+
+```text
+utils/validate_signature_rules.py
+```
+
+训练集验证结果：
+
+```text
+wsman-38649:
+tp=342 fp=0 fn=0
+precision=1.000000
+recall=1.000000
+5-fold valid precision=1.000000
+
+fortinet-13379:
+tp=3 fp=1 fn=102
+precision=0.750000
+recall=0.028571
+
+spip-27372:
+tp=2 fp=4 fn=0
+precision=0.333333
+recall=1.000000
+
+hikvision-7921:
+tp=0 fp=0 fn=1
+
+sonicwall-20016:
+support=0
+```
+
+仅启用训练验证通过的 `wsman-38649`：
+
+```text
+precision: 0.759890
+recall:    0.714950
+micro_f1:  0.736736
+macro_f1:  0.536132
+```
+
+### 自动挖掘训练集路径规则
+
+新增：
+
+```text
+utils/mine_path_signature_rules.py
+utils/apply_mined_path_rules.py
+```
+
+宽泛路径规则实验失败：
+
+```text
+min_precision=0.99
+min_support=20
+match_level=all
+only_empty=true
+micro_f1=0.622190
+```
+
+原因：训练集高精度路径前缀迁移到测试集后 FP 很多，说明规则增强不能只看训练集 precision。
+
+收紧到 exact normalized path：
+
+```text
+min_precision=1.0
+min_support=50
+match_level=exact
+only_empty=true
+loaded_rules=96
+changed_rows=317
+precision: 0.758251
+recall:    0.722462
+micro_f1:  0.739924
+macro_f1:  0.536005
+```
+
+与 `wsman-38649` 组合：
+
+```text
+precision: 0.759722
+recall:    0.728292
+micro_f1:  0.743675
+macro_f1:  0.536764
+```
+
+### 判断
+
+当前有两条清晰路线：
+
+```text
+泛化证据较强:
+OOF blocklist + wsman-38649 + exact mined path rules
+micro_f1=0.743675
+
+实验上界更高但泛化证据弱:
+OOF blocklist + hand-written signature rescue
+micro_f1=0.763359
+```
+
+这验证了 Claude 关于结构化特征的方向判断，但也修正了风险评估：规则必须精确、可验证、可配置，否则比 embedding 检索更容易过拟合。
+
 如需进一步讨论具体实现细节或代码示例，请随时沟通。
 
 ---

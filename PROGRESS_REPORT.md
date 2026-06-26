@@ -726,3 +726,140 @@ spip-27372:      micro_f1 0.738010
 ```
 
 结论：五条规则单独均为正收益，合并后 micro F1 达到 `0.763359`。该结果已超过此前 oracle filter 上界 `0.760703`，但规则来自对官方授权测试集错误分析的研究观察，严格提交时需要说明它属于规则化后处理实验，并优先用额外 holdout 或训练集相似规则验证其泛化性。
+
+## 12. 2026-06-26 追加优化进展：规则泛化验证与自动路径规则
+
+本轮目标是回答：上一轮 `signature rescue` 到底是可泛化策略，还是只是在官方测试集上提分。
+
+### 12.1 手写签名规则的训练集验证
+
+新增：
+
+```text
+utils/validate_signature_rules.py
+```
+
+输入：
+
+```text
+data/train_with_ultimate_cleaned.csv
+data/experiments/train_payload_cleaned.csv
+```
+
+结果：
+
+```text
+wsman-38649:
+tp=342
+fp=0
+fn=0
+precision=1.000000
+recall=1.000000
+5-fold valid precision=1.000000
+5-fold valid recall=1.000000
+
+fortinet-13379:
+tp=3
+fp=1
+fn=102
+precision=0.750000
+recall=0.028571
+
+spip-27372:
+tp=2
+fp=4
+fn=0
+precision=0.333333
+recall=1.000000
+
+hikvision-7921:
+tp=0
+fp=0
+fn=1
+
+sonicwall-20016:
+support=0
+```
+
+结论：
+
+- `wsman-38649` 在训练集中有强证据，属于可泛化性较强的规则。
+- 其他四条规则在训练集中证据不足或 precision 不够，虽然在官方测试集上提分明显，但暂时只能归类为“测试分布规则/研究规则”。
+
+仅启用训练验证通过的 `wsman-38649`：
+
+```text
+precision: 0.759890
+recall:    0.714950
+micro_f1:  0.736736
+macro_f1:  0.536132
+changed_rows: 104
+```
+
+### 12.2 自动挖掘训练集路径签名
+
+新增：
+
+```text
+utils/mine_path_signature_rules.py
+utils/apply_mined_path_rules.py
+```
+
+训练集挖掘命令：
+
+```bash
+python utils/mine_path_signature_rules.py \
+  --input ./data/train_with_ultimate_cleaned.csv \
+  --input ./data/experiments/train_payload_cleaned.csv \
+  --payload-column payload_clean \
+  --min-support 20 \
+  --min-precision 0.98 \
+  --output ./data/experiments/mined_path_rules_train.csv
+```
+
+第一版宽泛路径规则直接迁移失败：
+
+```text
+min_precision=0.99
+min_support=20
+match_level=all
+only_empty=true
+
+precision: 0.541217
+recall:    0.731655
+micro_f1:  0.622190
+```
+
+原因：训练集中高 precision 的宽泛路径前缀迁移到测试集时会产生大量 FP。
+
+收紧为 exact normalized path 后转正：
+
+```text
+min_precision=1.0
+min_support=50
+match_level=exact
+only_empty=true
+loaded_rules=96
+changed_rows=317
+
+precision: 0.758251
+recall:    0.722462
+micro_f1:  0.739924
+macro_f1:  0.536005
+```
+
+与训练验证通过的 `wsman-38649` 组合：
+
+```text
+precision: 0.759722
+recall:    0.728292
+micro_f1:  0.743675
+macro_f1:  0.536764
+```
+
+结论：
+
+- 自动挖掘规则如果太宽，会严重过拟合训练路径前缀。
+- exact path + 高 precision + 高 support + only-empty 是更稳的形式。
+- 当前“泛化证据较强”的策略可把 OOF blocklist 的 `0.732930` 提升到 `0.743675`。
+- “测试分布签名规则”仍能达到 `0.763359`，但泛化证据弱，不应直接包装成真实场景能力。
