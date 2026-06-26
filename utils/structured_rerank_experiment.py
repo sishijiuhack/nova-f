@@ -2,11 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
-from collections import Counter
 from pathlib import Path
-from urllib.parse import parse_qsl, unquote, urlsplit
 
 import numpy as np
 import pandas as pd
@@ -17,69 +14,12 @@ if str(ROOT) not in sys.path:
 
 from src.preprocess import clean_payload_text, normalize_cve_labels
 from src.search_faiss import adaptive_predict, aggregate_cve_candidates, has_cve_label, should_suppress_by_empty_neighbors
+from src.structured_features import feature_bonus, parse_payload
 from utils.evaluate_predictions import evaluate
 
 
 def parse_float_list(value: str) -> list[float]:
     return [float(item) for item in value.split(",") if item.strip()]
-
-
-def safe_urlsplit(target: str) -> tuple[str, str]:
-    try:
-        split = urlsplit(target)
-        return split.path, split.query
-    except ValueError:
-        path, _, query = target.partition("?")
-        return path, query
-
-
-def normalized_tokens(value: str) -> set[str]:
-    value = unquote(value.lower())
-    return {token for token in re.split(r"[^a-z0-9_]+", value) if len(token) >= 3}
-
-
-def parse_payload(payload: object) -> dict[str, object]:
-    cleaned = clean_payload_text("" if payload is None else str(payload))
-    parts = cleaned.split(" ", 2)
-    method = parts[0].upper() if parts else ""
-    target = parts[1] if len(parts) > 1 else ""
-    rest = parts[2] if len(parts) > 2 else ""
-    raw_path, raw_query = safe_urlsplit(target)
-    path = unquote(raw_path.lower())
-    path = re.sub(r"\d+", "{num}", path)
-    path = re.sub(r"[0-9a-f]{16,}", "{hex}", path)
-    query_pairs = parse_qsl(raw_query, keep_blank_values=True)
-    body_pairs = parse_qsl(rest, keep_blank_values=True)
-    query_keys = {key.lower() for key, _ in query_pairs if key}
-    body_keys = {key.lower() for key, _ in body_pairs if key}
-    return {
-        "method": method,
-        "path": path,
-        "path_tokens": normalized_tokens(path),
-        "query_keys": query_keys,
-        "body_keys": body_keys,
-        "tokens": normalized_tokens(cleaned),
-    }
-
-
-def jaccard(left: set[str], right: set[str]) -> float:
-    if not left and not right:
-        return 0.0
-    union = left | right
-    return len(left & right) / len(union) if union else 0.0
-
-
-def feature_bonus(query: dict[str, object], train: dict[str, object]) -> float:
-    bonus = 0.0
-    if query["method"] and query["method"] == train["method"]:
-        bonus += 0.20
-    if query["path"] and query["path"] == train["path"]:
-        bonus += 0.35
-    bonus += 0.20 * jaccard(query["path_tokens"], train["path_tokens"])  # type: ignore[arg-type]
-    bonus += 0.15 * jaccard(query["query_keys"], train["query_keys"])  # type: ignore[arg-type]
-    bonus += 0.10 * jaccard(query["body_keys"], train["body_keys"])  # type: ignore[arg-type]
-    bonus += 0.05 * jaccard(query["tokens"], train["tokens"])  # type: ignore[arg-type]
-    return bonus
 
 
 def load_train_payloads(paths: list[Path], payload_column: str) -> list[str]:

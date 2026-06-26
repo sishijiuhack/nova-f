@@ -190,6 +190,8 @@ def label_test_payloads(
 	empty_penalty_ratio: float,
 	test_text_prefix: str | None,
 	prediction_blocklist: set[str] | None,
+	structured_rerank_alpha: float,
+	train_feature_path: Path | None,
 	reuse_cache: bool,
 ) -> Path:
 	"""Generate CVE predictions for the provided test dataset."""
@@ -211,10 +213,29 @@ def label_test_payloads(
 		preprocess_mod.normalize_cve_labels(labels) for labels in raw_train_labels
 	]
 	train_has_cve = [search_mod.has_cve_label(labels) for labels in train_labels]
+	train_features = None
+	if structured_rerank_alpha > 0:
+		feature_source = train_feature_path or test_path
+		feature_frame = pd.read_csv(feature_source)
+		if "payload_clean" not in feature_frame.columns:
+			raise KeyError(f"structured rerank requires payload_clean in {feature_source}")
+		if len(feature_frame) != len(train_labels):
+			raise ValueError(
+				f"structured rerank feature rows ({len(feature_frame)}) != train labels ({len(train_labels)})"
+			)
+		logging.info("Loading structured rerank features from %s", feature_source)
+		train_features = [
+			search_mod.parse_structured_features(payload)
+			for payload in feature_frame["payload_clean"].fillna("").astype(str)
+		]
 
 	index = faiss.read_index(str(index_path))
 
 	payloads, test_ids = search_mod.load_test_payloads(test_path, payload_column, id_column)
+	test_features = None
+	if structured_rerank_alpha > 0:
+		logging.info("Structured rerank enabled: alpha=%.4f", structured_rerank_alpha)
+		test_features = [search_mod.parse_structured_features(payload) for payload in payloads]
 
 	model_name = model_path or meta.get("embedding_model")
 	if not model_name:
@@ -271,6 +292,16 @@ def label_test_payloads(
 		for offset, row_id in enumerate(test_ids[start:end]):
 			sims = D[offset]
 			idxs = I[offset]
+			if structured_rerank_alpha > 0 and train_features is not None and test_features is not None:
+				query_features = test_features[start + offset]
+				sims = np.asarray(sims, dtype=np.float32).copy()
+				for col_idx, train_idx in enumerate(idxs):
+					if train_idx < 0 or train_idx >= len(train_features):
+						continue
+					sims[col_idx] += structured_rerank_alpha * search_mod.structured_feature_bonus(
+						query_features,
+						train_features[int(train_idx)],
+					)
 
 			for idx, score in zip(idxs, sims):
 				total_candidates += 1
@@ -372,6 +403,8 @@ def parse_args() -> argparse.Namespace:
 	parser.add_argument("--empty-penalty-floor", type=float, default=0.80, help="Minimum similarity for empty-label negative evidence")
 	parser.add_argument("--empty-penalty-ratio", type=float, default=0.50, help="Required empty-neighbour votes relative to CVE-neighbour votes")
 	parser.add_argument("--prediction-blocklist", default=None, help="Optional newline/comma separated CVE labels to remove from final predictions")
+	parser.add_argument("--structured-rerank-alpha", type=float, default=0.0, help="Optional structural rerank weight; 0 disables rerank")
+	parser.add_argument("--train-feature-path", default=None, help="Cleaned training CSV aligned with FAISS metadata for structured rerank")
 	parser.add_argument("--overwrite-clean", action="store_true", help="强制重新生成清洗数据")
 	parser.add_argument("--overwrite-test-clean", action="store_true", help="强制重新生成测试清洗数据")
 	parser.add_argument("--overwrite-index", action="store_true", help="强制重新构建索引")
@@ -458,6 +491,8 @@ def main() -> None:
 		empty_penalty_ratio=args.empty_penalty_ratio,
 		test_text_prefix=args.test_text_prefix,
 		prediction_blocklist=prediction_blocklist,
+		structured_rerank_alpha=args.structured_rerank_alpha,
+		train_feature_path=Path(args.train_feature_path) if args.train_feature_path else None,
 		reuse_cache=args.reuse_cache,
 	)
 

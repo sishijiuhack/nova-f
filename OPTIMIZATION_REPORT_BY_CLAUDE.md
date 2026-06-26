@@ -1316,3 +1316,117 @@ precision: 0.758397 -> 0.739922
 ```
 
 结论：Claude 关于结构化特征值得做的判断成立，但应该采用“可验证、轻量 rerank”的方式，而不是直接写大量手工规则。当前新增路线更偏召回和 Macro-F1，可作为真实场景候选；保守高 precision 路线仍应保留。
+ 
+## Codex 实验记录：未完成优化项收敛
+
+时间：2026-06-26
+
+本轮目标是把此前讨论的未完成项尽量工程化落地，并筛选哪些可以进入真实场景路线。
+
+新增：
+```text
+src/structured_features.py
+utils/export_rule_config.py
+utils/apply_rule_config.py
+utils/conditional_filter_predictions.py
+utils/export_data_gap_report.py
+```
+
+更新：
+```text
+main.py
+src/search_faiss.py
+utils/structured_signature_rules.py
+utils/structured_rerank_experiment.py
+```
+
+### 主流程 structured rerank
+
+`main.py` 已支持：
+```text
+--structured-rerank-alpha
+--train-feature-path
+```
+
+默认关闭，不影响原保守路线。已通过 200 行 smoke 测试。
+
+### 规则配置化
+
+结构化规则已支持导出为可审计 JSON：
+```text
+rule_id
+enabled
+rule_type
+signature
+target_cve
+support
+precision
+source
+risk_level
+```
+
+配置化应用复现召回增强结果：
+```text
+precision: 0.739922
+recall:    0.756264
+micro_f1:  0.748004
+macro_f1:  0.548448
+```
+
+### 条件式 blocklist
+
+已实现：
+```text
+utils/conditional_filter_predictions.py
+```
+
+实验结果：
+```text
+Preserved by allow signatures: 0
+micro_f1: 0.738662
+macro_f1: 0.546500
+```
+
+判断：工具完成，但当前没有可用 allow signature 命中 blocklist 内误伤标签，因此暂不采纳。
+
+### 数据缺口
+
+已导出无训练支持且 FN>=20 的 CVE，共 10 个：
+```text
+CVE-2021-20016
+CVE-2024-1800
+CVE-2020-8949
+CVE-2017-17215
+CVE-2020-35391
+CVE-2017-6514
+CVE-2023-3306
+CVE-2023-26801
+CVE-2013-3307
+CVE-2021-43163
+```
+
+结论：这些 CVE 不应靠测试集手写规则修复，需要补授权样本或公开样本。
+
+### 当前最终判断
+
+真实场景默认主线：
+```text
+OOF blocklist + wsman-38649 + exact mined path rules
+micro_f1=0.746699
+macro_f1=0.538537
+```
+
+真实场景召回优先路线：
+```text
+structured rerank + OOF blocklist + rule-config structured rules only-empty + wsman-38649
+micro_f1=0.748004
+macro_f1=0.548448
+```
+
+实验上界：
+```text
+hand-written signature rescue
+micro_f1=0.763359
+```
+
+但该上界不作为真实场景主线。

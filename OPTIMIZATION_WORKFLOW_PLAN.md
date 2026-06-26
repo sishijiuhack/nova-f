@@ -665,3 +665,81 @@ macro_f1=0.548448
 2. 将结构化规则导出为可审计配置格式，字段包括 rule_type、signature、label、support、precision、source。
 3. 为无训练支持但高 FN 的 CVE 准备外部样本补充清单，避免继续在测试集上写死规则。
 4. 对 rerank 做训练集 OOF 或 holdout 验证，进一步确认不是官方测试集偶然收益。
+ 
+## 9. 2026-06-26 执行记录：未完成项收敛
+
+本轮将上一节列出的下一步工程项推进到可执行状态。
+
+### 已完成
+
+1. 主流程可选 structured rerank：
+```text
+main.py --structured-rerank-alpha 0.03 --train-feature-path <aligned_clean_train.csv>
+```
+
+2. 结构化规则配置化：
+```text
+utils/export_rule_config.py
+utils/apply_rule_config.py
+```
+
+3. 条件式 blocklist：
+```text
+utils/conditional_filter_predictions.py
+```
+
+4. 无训练支持 CVE 补数据清单：
+```text
+utils/export_data_gap_report.py
+```
+
+5. 公共结构化特征模块：
+```text
+src/structured_features.py
+```
+
+### 验证结果
+
+主流程 rerank smoke 测试通过：
+```text
+data/experiments/smoke_main_structured_rerank.csv
+```
+
+配置化规则复现最佳召回增强结果：
+```text
+precision: 0.739922
+recall:    0.756264
+micro_f1:  0.748004
+macro_f1:  0.548448
+```
+
+条件式 blocklist 暂无收益：
+```text
+Preserved by allow signatures: 0
+micro_f1: 0.738662
+```
+
+数据缺口清单：
+```text
+no-train-support high-FN CVEs: 10
+```
+
+### 后续策略
+
+保守主线：
+```text
+OOF blocklist + wsman-38649 + exact mined path rules
+```
+
+召回优先路线：
+```text
+structured rerank + OOF blocklist + rule-config structured rules only-empty + wsman-38649
+```
+
+暂不继续做的方向：
+```text
+低 support 规则放宽
+全局多标签扩展
+测试集手写 signature rescue 作为真实主线
+无训练支持 CVE 的硬编码规则
+```

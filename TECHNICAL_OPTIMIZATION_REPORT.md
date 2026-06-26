@@ -1575,3 +1575,134 @@ zero_f1:   540 -> 535
 - 如果目标是最高 precision 和稳健保守输出，旧路线仍有价值。
 - 如果目标是提高 recall、Macro-F1 和长尾覆盖，新路线更合适。
 - 新路线的提升来自训练可验证规则和结构化特征，不依赖测试集手写签名，因此比 hand-written signature rescue 更适合真实场景讨论。
+ 
+## 20. 未完成优化的工程化收敛
+
+本轮目标是把此前列出的未完成项尽量收敛为可执行工程能力，而不是继续停留在实验脚本。
+
+### 20.1 结构化特征复用模块
+
+新增：
+```text
+src/structured_features.py
+```
+
+该模块统一实现：
+```text
+HTTP target 容错解析
+path/query/body/token 特征抽取
+candidate_signatures
+feature_bonus
+```
+
+之前 `structured_signature_rules.py` 和 `structured_rerank_experiment.py` 各自维护解析逻辑，容易产生规则和 rerank 特征不一致。本轮已改为复用同一个模块。
+
+### 20.2 主流程接入 rerank
+
+`main.py` 新增参数：
+```text
+--structured-rerank-alpha
+--train-feature-path
+```
+
+启用方式：
+```bash
+python main.py \
+  --train-path ./data/train_with_ultimate.csv \
+  --test-path ./data/test_payload.csv \
+  --store-dir ./embeddings/faiss_store_combined \
+  --output-path ./data/experiments/pred_recall_first.csv \
+  --model-path ./models/all-MiniLM-L6-v2 \
+  --reuse-cache \
+  --structured-rerank-alpha 0.03 \
+  --train-feature-path ./data/experiments/train_combined_cleaned.csv
+```
+
+默认 `alpha=0`，所以不会影响原有保守路线。
+
+### 20.3 规则配置化
+
+新增：
+```text
+utils/export_rule_config.py
+utils/apply_rule_config.py
+```
+
+配置 JSON 字段：
+```text
+rule_id
+enabled
+rule_type
+signature
+target_cve
+support
+precision
+source
+risk_level
+```
+
+配置化应用结果与 CSV 规则应用一致：
+```text
+precision: 0.739922
+recall:    0.756264
+micro_f1:  0.748004
+macro_f1:  0.548448
+```
+
+这解决了“规则硬编码、难审计”的问题。
+
+### 20.4 条件式 blocklist
+
+新增：
+```text
+utils/conditional_filter_predictions.py
+```
+
+设计目标：全局 blocklist 容易误伤真实攻击，因此加入 allow signature。如果某 CVE 在 blocklist 中，但 payload 命中该 CVE 的训练验证签名，则保留。
+
+本轮实验结果：
+```text
+Preserved by allow signatures: 0
+micro_f1: 0.738662
+macro_f1: 0.546500
+```
+
+结论：工具实现完成，但当前 allow config 没有覆盖 blocklist 内误伤项，因此暂不采纳。后续只有当某些 blocklist CVE 有训练验证 allow signature 时，这个工具才会产生收益。
+
+### 20.5 数据缺口报告
+
+新增：
+```text
+utils/export_data_gap_report.py
+```
+
+导出结果：
+```text
+data/experiments/cve_data_gap_no_train_support.csv
+data/experiments/cve_data_gap_no_train_support.md
+```
+
+无训练支持且 FN>=20 的 CVE 共 10 个：
+```text
+CVE-2021-20016
+CVE-2024-1800
+CVE-2020-8949
+CVE-2017-17215
+CVE-2020-35391
+CVE-2017-6514
+CVE-2023-3306
+CVE-2023-26801
+CVE-2013-3307
+CVE-2021-43163
+```
+
+这些是当前 Macro-F1 和 recall 的硬缺口。没有训练证据时，继续写规则属于测试集过拟合，不应作为真实场景优化。
+
+### 20.6 当前技术判断
+
+当前已经没有“明显未实现的工程化优化项”。剩余问题主要是数据覆盖问题和评估协议问题：
+
+- 无训练支持 CVE 需要补样本。
+- rerank 已可用，但如果要作为默认路线，还应做更严格的 OOF/group holdout。
+- 条件式 blocklist 需要有 allow signature 才能产生收益。
+- hand-written signature rescue 仍只能作为上界，不进入真实场景默认主线。

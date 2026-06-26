@@ -329,3 +329,50 @@ python utils/diagnose_long_tail.py --help
 python utils/structured_signature_rules.py --help
 python utils/structured_rerank_experiment.py --help
 ```
+ 
+## 运行模式建议
+
+当前建议保留两种运行思路。
+
+保守高 precision：
+```text
+OOF blocklist + wsman-38649 + exact mined path rules
+precision: 0.758397
+recall:    0.735355
+micro_f1:  0.746699
+macro_f1:  0.538537
+```
+
+召回/Macro-F1 优先：
+```text
+structured rerank + OOF blocklist + rule-config structured rules only-empty + wsman-38649
+precision: 0.739922
+recall:    0.756264
+micro_f1:  0.748004
+macro_f1:  0.548448
+```
+
+主流程可启用 structured rerank：
+```bash
+python main.py \
+  --train-path ./data/train_with_ultimate.csv \
+  --test-path ./data/test_payload.csv \
+  --store-dir ./embeddings/faiss_store_combined \
+  --output-path ./data/experiments/pred_recall_first.csv \
+  --model-path ./models/all-MiniLM-L6-v2 \
+  --reuse-cache \
+  --structured-rerank-alpha 0.03 \
+  --train-feature-path ./data/experiments/train_combined_cleaned.csv
+```
+
+规则配置化工具：
+```bash
+python utils/export_rule_config.py --help
+python utils/apply_rule_config.py --help
+```
+
+条件式过滤和数据缺口工具：
+```bash
+python utils/conditional_filter_predictions.py --help
+python utils/export_data_gap_report.py --help
+```

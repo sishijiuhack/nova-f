@@ -14,8 +14,12 @@ from tqdm import tqdm
 
 try:
     from preprocess import clean_payload_text, normalize_cve_labels
+    from structured_features import feature_bonus as structured_feature_bonus
+    from structured_features import parse_payload as parse_structured_features
 except ImportError:  # pragma: no cover
     from .preprocess import clean_payload_text, normalize_cve_labels
+    from .structured_features import feature_bonus as structured_feature_bonus
+    from .structured_features import parse_payload as parse_structured_features
 
 
 def configure_logging(verbose: bool) -> None:

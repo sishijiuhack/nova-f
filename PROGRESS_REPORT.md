@@ -1162,3 +1162,133 @@ OOF blocklist + wsman-38649 + exact mined path rules
 召回/Macro-F1 优先:
 structured rerank + OOF blocklist + structured rules only-empty + wsman-38649
 ```
+ 
+## 16. 2026-06-26 追加优化进展：未完成项收敛
+
+本轮把上一轮遗留的工程化优化全部补齐，并区分“完成且采纳”和“完成但暂不采纳”。
+
+新增或更新：
+```text
+src/structured_features.py
+main.py
+src/search_faiss.py
+utils/export_rule_config.py
+utils/apply_rule_config.py
+utils/conditional_filter_predictions.py
+utils/export_data_gap_report.py
+```
+
+### 16.1 主流程可选 structured rerank
+
+`main.py` 已新增：
+```text
+--structured-rerank-alpha
+--train-feature-path
+```
+
+默认 `--structured-rerank-alpha 0`，不改变原有输出。启用时会读取与 FAISS meta 对齐的 cleaned train CSV，对 top-k 近邻相似度加入结构化特征加权。
+
+已通过 200 行 smoke 测试：
+```text
+output: data/experiments/smoke_main_structured_rerank.csv
+structured_rerank_alpha: 0.03
+prediction_blocklist: fold_blocklist_fp20_p002_mf2.txt
+result: pipeline completed
+```
+
+### 16.2 规则配置化
+
+结构化规则已可导出为可审计 JSON 配置：
+```text
+data/experiments/structured_rules_train_s20_p1_config.json
+```
+
+配置字段包括：
+```text
+rule_id
+enabled
+rule_type
+signature
+target_cve
+support
+precision
+source
+risk_level
+```
+
+配置化应用复现了上一轮最佳召回增强结果：
+```text
+precision: 0.739922
+recall:    0.756264
+micro_f1:  0.748004
+macro_f1:  0.548448
+```
+
+### 16.3 条件式 blocklist
+
+新增：
+```text
+utils/conditional_filter_predictions.py
+```
+
+目标是避免全局 CVE blocklist 误伤：如果 payload 命中该 CVE 的 allow signature，则保留，否则过滤。
+
+本轮实验：
+```text
+Preserved by allow signatures: 0
+micro_f1: 0.738662
+macro_f1: 0.546500
+```
+
+结论：工具完成，但当前 allow config 没有覆盖 blocklist 内被误伤标签，所以暂不采纳为最优路线。
+
+### 16.4 数据缺口清单
+
+新增：
+```text
+utils/export_data_gap_report.py
+```
+
+已导出无训练支持且 FN>=20 的 CVE：
+```text
+data/experiments/cve_data_gap_no_train_support.csv
+data/experiments/cve_data_gap_no_train_support.md
+```
+
+当前缺口 10 个：
+```text
+CVE-2021-20016
+CVE-2024-1800
+CVE-2020-8949
+CVE-2017-17215
+CVE-2020-35391
+CVE-2017-6514
+CVE-2023-3306
+CVE-2023-26801
+CVE-2013-3307
+CVE-2021-43163
+```
+
+这些不能靠训练集可验证规则解决，真实场景需要补授权样本或公开样本。
+
+### 16.5 当前最终路线
+
+默认主线仍建议保守高 precision：
+```text
+OOF blocklist + wsman-38649 + exact mined path rules
+precision: 0.758397
+recall:    0.735355
+micro_f1:  0.746699
+macro_f1:  0.538537
+```
+
+真实场景召回优先路线：
+```text
+structured rerank + OOF blocklist + config structured rules only-empty + wsman-38649
+precision: 0.739922
+recall:    0.756264
+micro_f1:  0.748004
+macro_f1:  0.548448
+```
+
+实验上界仍是 hand-written signature rescue，但不作为真实场景主线。
