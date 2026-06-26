@@ -1075,6 +1075,70 @@ micro_f1=0.763359
 
 这验证了 Claude 关于结构化特征的方向判断，但也修正了风险评估：规则必须精确、可验证、可配置，否则比 embedding 检索更容易过拟合。
 
+---
+
+## Codex 实验记录：OOF mined-rule 验证与 Macro-F1 问题
+
+时间：2026-06-26
+
+新增：
+
+```text
+utils/validate_mined_path_rules_oof.py
+```
+
+目的：验证自动挖掘 path rules 是否真的能在训练集 OOF 中泛化，而不是全训练集统计后碰巧对官方测试有效。
+
+OOF 结果：
+
+```text
+exact path, min_precision=1.0, min_support=50:
+precision: 0.995759
+recall:    0.513666
+micro_f1:  0.677177
+macro_f1:  0.760765
+
+exact path, min_precision=1.0, min_support=20:
+precision: 0.992277
+recall:    0.635369
+micro_f1:  0.774552
+macro_f1:  0.860057
+```
+
+官方授权测试集研究评估：
+
+```text
+OOF blocklist + wsman-38649 + exact mined rules support=20:
+precision: 0.758397
+recall:    0.735355
+micro_f1:  0.746699
+macro_f1:  0.538537
+```
+
+结论：
+
+- exact mined path rules 在训练 OOF 中有高 precision 证据。
+- `support=20` 比 `support=50` 覆盖更好，迁移到官方测试后也优于 support=50。
+- 当前“泛化证据较强路线”的 micro F1 更新为 `0.746699`。
+
+Macro-F1 问题也正式记录：
+
+- Micro-F1 被高频 CVE 主导。
+- Macro-F1 对每个 CVE 等权平均，因此大量长尾 CVE 的低 F1 会显著拉低总分。
+- 当前规则和 blocklist 主要改善部分高频/固定路径问题，对大量 zero-F1 或低 F1 CVE 覆盖仍不足。
+
+后续实验必须同时报告：
+
+```text
+micro_f1
+macro_f1
+per-label F1
+zero-F1 CVE count
+top FN labels
+```
+
+下一步建议优先做多标签输出策略优化和 per-label 评估脚本。
+
 如需进一步讨论具体实现细节或代码示例，请随时沟通。
 
 ---

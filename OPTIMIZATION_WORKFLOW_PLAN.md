@@ -483,3 +483,57 @@ macro_f1=0.536764
 1. 把 mined rules 输出为配置文件格式，加入可审计字段：signature、label、support、precision、source。
 2. 做 OOF 级别的 mined-rule 验证，不能只用全训练集挖规则再看官方测试。
 3. 继续研究高 FN 中训练集无证据但官方测试收益大的规则，判断是否需要外部公开样本补充。
+
+## 10. 2026-06-26 执行记录：OOF mined-rule 验证与 Macro-F1
+
+已实现：
+
+```text
+utils/validate_mined_path_rules_oof.py
+```
+
+OOF 验证结果：
+
+```text
+exact path, min_precision=1.0, min_support=50:
+precision: 0.995759
+recall:    0.513666
+micro_f1:  0.677177
+macro_f1:  0.760765
+
+exact path, min_precision=1.0, min_support=20:
+precision: 0.992277
+recall:    0.635369
+micro_f1:  0.774552
+macro_f1:  0.860057
+```
+
+官方授权测试集研究评估：
+
+```text
+OOF blocklist + wsman-38649 + exact mined rules support=20:
+precision: 0.758397
+recall:    0.735355
+micro_f1:  0.746699
+macro_f1:  0.538537
+```
+
+当前路线分层：
+
+```text
+泛化证据较强:
+micro_f1=0.746699
+macro_f1=0.538537
+
+实验上界更高但泛化证据弱:
+micro_f1=0.763359
+macro_f1=0.539183
+```
+
+Macro-F1 问题已记录：当前 Macro-F1 远低于 Micro-F1，说明长尾 CVE 覆盖不足。后续每次优化必须同时记录 `micro_f1`、`macro_f1`、per-label F1 和 zero-F1 类别数量。
+
+下一步建议：
+
+1. 增加 per-label 评估脚本，输出 zero-F1 CVE 数、低 F1 CVE top 列表。
+2. 做多标签输出策略优化，优先解决 `CVE-2021-38649` 这类“近邻已命中但输出截断”的问题。
+3. 将 mined path rules 配置化，而不是硬编码在脚本逻辑里。

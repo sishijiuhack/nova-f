@@ -863,3 +863,106 @@ macro_f1:  0.536764
 - exact path + 高 precision + 高 support + only-empty 是更稳的形式。
 - 当前“泛化证据较强”的策略可把 OOF blocklist 的 `0.732930` 提升到 `0.743675`。
 - “测试分布签名规则”仍能达到 `0.763359`，但泛化证据弱，不应直接包装成真实场景能力。
+
+## 13. 2026-06-26 追加优化进展：OOF mined-rule 验证与 Macro-F1 记录
+
+本轮继续推进 `OOF mined-rule 验证`，并把 Macro-F1 远低于 Micro-F1 的问题记录为后续优化约束。
+
+### 13.1 OOF mined-rule 验证
+
+新增：
+
+```text
+utils/validate_mined_path_rules_oof.py
+```
+
+方法：
+
+1. 将训练集分成 5 折。
+2. 每折只用 K-1 折挖掘 method/path -> CVE 规则。
+3. 在 held-out 折验证规则 precision/recall/F1。
+4. 该流程不读取官方测试真值。
+
+配置一：
+
+```text
+match_level=exact
+min_precision=1.0
+min_support=50
+```
+
+OOF 均值：
+
+```text
+precision: 0.995759
+recall:    0.513666
+micro_f1:  0.677177
+macro_f1:  0.760765
+```
+
+配置二：
+
+```text
+match_level=exact
+min_precision=1.0
+min_support=20
+```
+
+OOF 均值：
+
+```text
+precision: 0.992277
+recall:    0.635369
+micro_f1:  0.774552
+macro_f1:  0.860057
+```
+
+结论：exact path mined rules 在训练 OOF 上 precision 很高，说明这条规则挖掘路线具备较强泛化证据。`support=20` 比 `support=50` 覆盖更好，precision 仍可接受。
+
+### 13.2 官方授权测试集研究评估
+
+将 `wsman-38649` 与 exact mined rules 组合：
+
+```text
+OOF blocklist + wsman-38649 + exact mined rules (support=50):
+precision: 0.759722
+recall:    0.728292
+micro_f1:  0.743675
+macro_f1:  0.536764
+
+OOF blocklist + wsman-38649 + exact mined rules (support=20):
+precision: 0.758397
+recall:    0.735355
+micro_f1:  0.746699
+macro_f1:  0.538537
+```
+
+当前“泛化证据较强”的最佳结果更新为：
+
+```text
+precision: 0.758397
+recall:    0.735355
+micro_f1:  0.746699
+macro_f1:  0.538537
+```
+
+### 13.3 Macro-F1 问题记录
+
+当前 Macro-F1 长期远低于 Micro-F1，原因不是单一 bug，而是类别表现不均衡：
+
+- Micro-F1 被高频 CVE 主导，高频类预测好即可维持较高分。
+- Macro-F1 对每个 CVE 等权平均，大量长尾 CVE 的 F1 接近 0，会显著拉低平均值。
+- 当前 OOF blocklist 和 empty-neighbor suppression 偏向提升 precision，可能进一步牺牲低频 CVE 召回。
+- 多标签截断也会让某些 CVE 类整体 F1 接近 0，例如此前 `CVE-2021-38649`。
+
+后续优化不能只看 micro-F1，需要同时记录：
+
+```text
+micro_f1
+macro_f1
+per-label F1
+top-FN labels
+zero-F1 labels count
+```
+
+当前 exact mined rules 对 Macro-F1 有小幅帮助：`0.535373 -> 0.538537`，但提升有限，说明仍有大量长尾 CVE 没有被覆盖。

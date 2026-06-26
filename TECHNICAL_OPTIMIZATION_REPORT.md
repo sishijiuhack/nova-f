@@ -1252,3 +1252,95 @@ macro_f1:  0.536764
 ```
 
 这说明真实场景优化不能只看最高分。下一步应优先把 exact path rules 做成可配置规则文件，并在 OOF 中验证每条规则，而不是把官方测试错误分析得到的规则直接写死。
+
+## 17. OOF mined-rule 验证与 Macro-F1 问题
+
+### 17.1 OOF mined-rule 验证
+
+上一节中，自动挖掘 path rules 是“全训练集挖规则，再看官方测试”。这比手写测试规则更好，但仍不够严格。本轮补了真正的训练集 OOF 验证。
+
+新增：
+
+```text
+utils/validate_mined_path_rules_oof.py
+```
+
+流程：
+
+```text
+5-fold split
+每折用 K-1 折挖 exact method/path -> CVE 规则
+在 held-out 折验证规则 precision/recall/F1
+```
+
+配置 `min_support=50,min_precision=1.0,match_level=exact`：
+
+```text
+precision: 0.995759
+recall:    0.513666
+micro_f1:  0.677177
+macro_f1:  0.760765
+```
+
+配置 `min_support=20,min_precision=1.0,match_level=exact`：
+
+```text
+precision: 0.992277
+recall:    0.635369
+micro_f1:  0.774552
+macro_f1:  0.860057
+```
+
+这个结果说明 exact path rules 不是单纯测试集 trick，在训练分布上也有高 precision 泛化证据。`support=20` 的覆盖更好，precision 仍保持在 0.99 以上。
+
+官方授权测试集研究评估：
+
+```text
+OOF blocklist + wsman-38649 + exact mined rules support=20
+precision: 0.758397
+recall:    0.735355
+micro_f1:  0.746699
+macro_f1:  0.538537
+```
+
+因此当前可以区分两条路线：
+
+```text
+泛化证据较强路线:
+micro_f1=0.746699
+macro_f1=0.538537
+
+实验上界路线:
+micro_f1=0.763359
+macro_f1=0.539183
+```
+
+### 17.2 Macro-F1 低的技术解释
+
+当前 Macro-F1 明显低于 Micro-F1，说明系统表现高度不均衡：
+
+- Micro-F1 汇总所有 TP/FP/FN，高频 CVE 对它影响更大。
+- Macro-F1 先对每个 CVE 算 F1，再等权平均，长尾 CVE 和高频 CVE 权重相同。
+- 很多低频或难召回 CVE 的 F1 接近 0，会强烈拉低 Macro-F1。
+
+典型问题包括：
+
+```text
+CVE-2021-20016: 曾经 tp=0, fn=403
+CVE-2017-7921:  曾经 tp=0, fn=139
+CVE-2021-38649: 多标签截断导致整体漏召回
+CVE-2023-27372: 与 CVE-2024-8517 冲突
+CVE-2018-13379: 固定路径被 empty-neighbour 压制
+```
+
+这说明后续优化要同时看：
+
+```text
+micro_f1
+macro_f1
+per-label F1
+zero-F1 CVE count
+top FN labels
+```
+
+只优化 micro-F1 容易继续偏向高频类；要提升 Macro-F1，需要专门解决长尾 CVE 的召回和多标签输出问题。
