@@ -101,6 +101,14 @@ CVE 候选聚合
 source ./setup_install.sh
 ```
 
+安装完成后，可以用启动脚本运行：
+
+```bash
+./run.sh --help
+./run.sh --mode precision
+./run.sh --mode recall --alpha 0.03
+```
+
 脚本会：
 
 ```text
